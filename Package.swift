@@ -11,6 +11,8 @@ let package = Package(
     ],
     targets: [
         .target(name: "Core"),
+        .target(name: "ProcessKit"),
         .testTarget(name: "CoreTests", dependencies: ["Core"]),
+        .testTarget(name: "ProcessKitTests", dependencies: ["ProcessKit"]),
     ]
 )
