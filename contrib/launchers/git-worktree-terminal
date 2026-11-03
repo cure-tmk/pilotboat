@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+capabilities)
+  echo '{"reuseWorkspace": true, "sendToSession": false}'
+  ;;
+diagnose)
+  missing=()
+  for c in git jq claude; do command -v "$c" >/dev/null || missing+=("$c"); done
+  if ((${#missing[@]})); then echo "missing on PATH: ${missing[*]}"; exit 1; fi
+  echo "git, jq and claude found"
+  ;;
+open)
+  open -a Terminal "${2:?workspaceRef required}"
+  ;;
+launch)
+  req=$(cat)
+  pr='.subject.pullRequest'
+  local_path=$(jq -r '.launcherSettings.localPath // .repository.launcherBinding // empty' <<<"$req")
+  [[ -n "$local_path" ]] || { echo "localPath is not configured" >&2; exit 2; }
+  policy=$(jq -r .workspacePolicy <<<"$req")
+  number=$(jq -r "$pr.number" <<<"$req")
+  head_ref=$(jq -r "$pr.headRef" <<<"$req")
+  head_sha=$(jq -r "$pr.headSHA" <<<"$req")
+  repo_name=$(basename "$local_path")
+  base="$(cd "$local_path" && pwd)/../${repo_name}-worktrees"
+  mkdir -p "$base"
+  base=$(cd "$base" && pwd -P)
+  reused=false
+
+  if [[ "$policy" == reuseOrCreate ]]; then
+    dir="$base/pr-$number"
+    found=$(git -C "$local_path" worktree list --porcelain | awk -v b="refs/heads/$head_ref" '/^worktree /{w=substr($0,10)} $1=="branch" && $2==b {print w; exit}')
+    if [[ -n "$found" ]]; then
+      dir=$(cd "$found" && pwd -P); reused=true
+    else
+      git -C "$local_path" fetch origin "$head_ref" >&2 || true
+      git -C "$local_path" worktree add "$dir" "$head_ref" >&2
+    fi
+  else
+    dir="$base/pr-$number-review"
+    git -C "$local_path" fetch origin "$head_ref" >&2
+    git -C "$local_path" worktree add --detach "$dir" "$head_sha" >&2
+  fi
+
+  # Prompt goes through a file so no quoting of its content is ever interpreted by a shell or AppleScript.
+  pf=$(mktemp -t pilotboat-prompt)
+  jq -r .prompt <<<"$req" >"$pf"
+  cmd="cd $(printf %q "$dir") && claude \"\$(cat $(printf %q "$pf"))\""
+  if [[ "${PILOTBOAT_DRY_RUN:-}" == 1 ]]; then
+    echo "DRY-RUN: osascript Terminal do script: $cmd" >&2
+  else
+    osascript - "$cmd" >/dev/null <<'OSA'
+on run argv
+  tell application "Terminal"
+    activate
+    do script (item 1 of argv)
+  end tell
+end run
+OSA
+  fi
+
+  jq -n --arg dir "$dir" --argjson reused "$reused" \
+    '{workspaceRef: $dir, terminalHandle: null, reusedWorkspace: $reused, sentToExistingSession: false}'
+  ;;
+*)
+  echo "usage: $0 launch|diagnose|capabilities|open <ref>" >&2
+  exit 64
+  ;;
+esac

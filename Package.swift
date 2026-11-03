@@ -16,10 +16,12 @@ let package = Package(
         .target(name: "Persistence", dependencies: ["Core", .product(name: "GRDB", package: "GRDB.swift")]),
         .target(name: "SourceGitHub", dependencies: ["Core"]),
         .target(name: "LauncherOrca", dependencies: ["Core", "ProcessKit"]),
+        .target(name: "LauncherScript", dependencies: ["Core", "ProcessKit"]),
         .testTarget(name: "CoreTests", dependencies: ["Core"]),
         .testTarget(name: "ProcessKitTests", dependencies: ["ProcessKit"]),
         .testTarget(name: "PersistenceTests", dependencies: ["Persistence"]),
         .testTarget(name: "SourceGitHubTests", dependencies: ["SourceGitHub"]),
         .testTarget(name: "LauncherOrcaTests", dependencies: ["LauncherOrca"]),
+        .testTarget(name: "LauncherScriptTests", dependencies: ["LauncherScript"]),
     ]
 )
