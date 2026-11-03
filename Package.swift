@@ -6,6 +6,7 @@ let package = Package(
     defaultLocalization: "en",
     platforms: [.macOS(.v14)],
     products: [
+        .executable(name: "Pilotboat", targets: ["Pilotboat"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
@@ -17,6 +18,12 @@ let package = Package(
         .target(name: "SourceGitHub", dependencies: ["Core"]),
         .target(name: "LauncherOrca", dependencies: ["Core", "ProcessKit"]),
         .target(name: "LauncherScript", dependencies: ["Core", "ProcessKit"]),
+        .executableTarget(
+            name: "Pilotboat",
+            dependencies: ["Core", "Persistence", "ProcessKit", "SourceGitHub", "LauncherOrca", "LauncherScript"],
+            path: "Sources/App",
+            resources: [.process("Resources")]
+        ),
         .testTarget(name: "CoreTests", dependencies: ["Core"]),
         .testTarget(name: "ProcessKitTests", dependencies: ["ProcessKit"]),
         .testTarget(name: "PersistenceTests", dependencies: ["Persistence"]),

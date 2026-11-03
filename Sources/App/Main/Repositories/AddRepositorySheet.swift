@@ -1,0 +1,76 @@
+import Core
+import LauncherOrca
+import SwiftUI
+
+struct AddRepositorySheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var orcaRepos: [OrcaRepo] = []
+    @State private var picked: Set<String> = []
+
+    private var orcaId: LauncherID { model.config.launchers.first { $0.type == "orca" }?.id ?? "orca" }
+
+    private func fullName(_ repo: OrcaRepo) -> String? {
+        guard let key = repo.canonicalKey else { return nil }
+        let prefix = AppModel.host + "/"
+        return key.lowercased().hasPrefix(prefix) ? String(key.dropFirst(prefix.count)) : nil
+    }
+
+    private var candidates: [(repo: OrcaRepo, name: String)] {
+        orcaRepos.compactMap { repo in
+            guard let name = fullName(repo), model.config.repository(host: AppModel.host, fullName: name) == nil else { return nil }
+            return (repo, name)
+        }
+    }
+
+    private var typed: String { name.trimmingCharacters(in: .whitespaces) }
+    private var typedValid: Bool { typed.wholeMatch(of: /[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/) != nil }
+    private var typedTaken: Bool { model.config.repositories.contains { $0.fullName.caseInsensitiveCompare(typed) == .orderedSame } }
+
+    var body: some View {
+        Form {
+            Section {
+                TextField(String(localized: "owner/name", bundle: .resources), text: $name)
+                if !typed.isEmpty, !typedValid {
+                    Text("Use the form owner/name", bundle: .resources).font(.caption).foregroundStyle(.red)
+                } else if typedTaken {
+                    Text("Already added", bundle: .resources).font(.caption).foregroundStyle(.red)
+                }
+            }
+            if !candidates.isEmpty {
+                Section {
+                    ForEach(candidates, id: \.repo.id) { candidate in
+                        Toggle(candidate.name, isOn: Binding(
+                            get: { picked.contains(candidate.repo.id) },
+                            set: { if $0 { picked.insert(candidate.repo.id) } else { picked.remove(candidate.repo.id) } }))
+                    }
+                } header: { Text("From Orca", bundle: .resources) }
+            }
+            HStack {
+                Spacer()
+                Button(role: .cancel) { dismiss() } label: { Text("Cancel", bundle: .resources) }.keyboardShortcut(.cancelAction)
+                Button { add() } label: { Text("Add", bundle: .resources) }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!(typedValid && !typedTaken) && picked.isEmpty)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 440, height: 380)
+        .task { orcaRepos = (try? await model.orcaRepos(launcherId: orcaId)) ?? [] }
+    }
+
+    private func add() {
+        var new: [Repository] = candidates.filter { picked.contains($0.repo.id) }
+            .map { Repository(fullName: $0.name, launcherBindings: [orcaId: $0.repo.id]) }
+        if typedValid, !typedTaken, !new.contains(where: { $0.fullName.caseInsensitiveCompare(typed) == .orderedSame }) {
+            new.append(Repository(fullName: typed))
+        }
+        let added = new
+        Task {
+            await model.updateConfig { $0.repositories.append(contentsOf: added) }
+            if let first = added.first { model.router.repositoryId = first.id }
+        }
+        dismiss()
+    }
+}
