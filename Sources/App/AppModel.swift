@@ -95,9 +95,17 @@ final class AppModel {
     }
 
     func updateConfig(_ transform: @Sendable (inout Config) -> Void) async {
+        let before = Set(config.repositories.map(\.id))
         await perform {
             try await engine.updateConfig(transform)
             apply(await engine.config)
+        }
+        if config.repositories.contains(where: { !before.contains($0.id) }) { await linkNewRepositories() }
+    }
+
+    private func linkNewRepositories() async {
+        for launcher in config.launchers where launcher.type == OrcaLauncher.typeID {
+            await bindRepositoriesToOrca(launcherId: launcher.id, reportErrors: false)
         }
     }
 
@@ -249,10 +257,10 @@ final class AppModel {
 
     /// Fills missing `launcherBindings[launcherId]` from Orca repos whose canonical key is `host/fullName`. Returns how many were bound.
     @discardableResult
-    func bindRepositoriesToOrca(launcherId: LauncherID = Bootstrap.defaultOrcaLauncherId) async -> Int {
+    func bindRepositoriesToOrca(launcherId: LauncherID = Bootstrap.defaultOrcaLauncherId, reportErrors: Bool = true) async -> Int {
         let repos: [OrcaRepo]
         do { repos = try await orcaRepos(launcherId: launcherId) } catch {
-            lastErrorMessage = error.localizedDescription
+            if reportErrors { lastErrorMessage = error.localizedDescription }
             return 0
         }
         let byKey = Dictionary(repos.compactMap { r in r.canonicalKey.map { ($0.lowercased(), r.id) } }, uniquingKeysWith: { a, _ in a })
@@ -307,6 +315,7 @@ final class AppModel {
             try await engine.updateConfig { @Sendable in $0 = imported }
             apply(await engine.config)
         }
+        await linkNewRepositories()
         return result
     }
 

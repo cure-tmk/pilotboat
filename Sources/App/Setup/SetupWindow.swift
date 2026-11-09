@@ -336,10 +336,7 @@ private struct RepositoriesStep: View {
         guard valid else { return }
         field = ""
         guard model.config.repository(host: AppModel.host, fullName: name) == nil else { return }
-        Task {
-            await model.updateConfig { $0.repositories.append(Repository(fullName: name)) }
-            if launcher.kind == .orca { await model.bindRepositoriesToOrca() }
-        }
+        Task { await model.updateConfig { $0.repositories.append(Repository(fullName: name)) } }
     }
 }
 
