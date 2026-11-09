@@ -12,6 +12,7 @@ APP=".build/Pilotboat.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BUILD_DIR/Pilotboat" "$APP/Contents/MacOS/Pilotboat"
+cp Design/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 if [ -d "$BUILD_DIR/Pilotboat_Pilotboat.bundle" ]; then
   cp -R "$BUILD_DIR/Pilotboat_Pilotboat.bundle" "$APP/Contents/Resources/"
 fi
@@ -21,6 +22,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <plist version="1.0"><dict>
   <key>CFBundleDevelopmentRegion</key><string>en</string>
   <key>CFBundleExecutable</key><string>Pilotboat</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleIdentifier</key><string>io.github.cure-tmk.pilotboat</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>Pilotboat</string>
