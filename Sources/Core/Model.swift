@@ -114,7 +114,7 @@ public struct Repository: Codable, Hashable, Identifiable, Sendable {
     public var mutedEventKinds: Set<EventKind>
     public var launcherBindings: [LauncherID: String]
 
-    public init(id: UUID = UUID(), host: String = "github.com", fullName: String, monitoring: Bool = true, mutedEventKinds: Set<EventKind> = [], launcherBindings: [LauncherID: String] = [:]) {
+    public init(id: UUID = UUID(), host: String = Repository.defaultHost, fullName: String, monitoring: Bool = true, mutedEventKinds: Set<EventKind> = [], launcherBindings: [LauncherID: String] = [:]) {
         self.id = id; self.host = host; self.fullName = fullName; self.monitoring = monitoring
         self.mutedEventKinds = mutedEventKinds; self.launcherBindings = launcherBindings
     }

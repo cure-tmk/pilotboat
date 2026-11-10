@@ -30,5 +30,6 @@ let package = Package(
         .testTarget(name: "SourceGitHubTests", dependencies: ["SourceGitHub"]),
         .testTarget(name: "LauncherOrcaTests", dependencies: ["LauncherOrca"]),
         .testTarget(name: "LauncherScriptTests", dependencies: ["LauncherScript"]),
+        .testTarget(name: "PilotboatTests", dependencies: ["Pilotboat"]),
     ]
 )

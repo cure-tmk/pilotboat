@@ -4,48 +4,13 @@ import ProcessKit
 import Testing
 @testable import LauncherScript
 
-final class FakeRunner: CommandRunner, @unchecked Sendable {
-    let lock = NSLock()
-    var commands: [Command] = []
-    var result: CommandResult
-    init(_ result: CommandResult) { self.result = result }
-    func run(_ command: Command) async throws -> CommandResult {
-        lock.withLock { commands.append(command) }
-        return result
-    }
-}
-
-struct ProcessRunner: CommandRunner {
+/// The real runner, with the sample script's Terminal step disabled.
+struct DryRunRunner: CommandRunner {
+    let base = ProcessRunner(searchPath: ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])
     func run(_ c: Command) async throws -> CommandResult {
-        try await withCheckedThrowingContinuation { k in
-            DispatchQueue.global().async { k.resume(with: Result { try Self.runSync(c) }) }
-        }
-    }
-
-    static func runSync(_ c: Command) throws -> CommandResult {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pbrun-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let (inURL, outURL, errURL) = (dir.appendingPathComponent("in"), dir.appendingPathComponent("out"), dir.appendingPathComponent("err"))
-        try (c.stdin ?? Data()).write(to: inURL)
-        FileManager.default.createFile(atPath: outURL.path, contents: nil)
-        FileManager.default.createFile(atPath: errURL.path, contents: nil)
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: c.executable)
-        p.arguments = c.arguments
-        p.environment = ProcessInfo.processInfo.environment.merging(c.environment ?? [:]) { $1 }
-        p.standardInput = try FileHandle(forReadingFrom: inURL)
-        p.standardOutput = try FileHandle(forWritingTo: outURL)
-        p.standardError = try FileHandle(forWritingTo: errURL)
-        try p.run()
-        let deadline = Date().addingTimeInterval(c.timeout)
-        var timedOut = false
-        while p.isRunning {
-            if Date() > deadline { timedOut = true; p.terminate(); break }
-            Thread.sleep(forTimeInterval: 0.02)
-        }
-        p.waitUntilExit()
-        return CommandResult(exitCode: p.terminationStatus, stdout: try Data(contentsOf: outURL), stderr: try Data(contentsOf: errURL), timedOut: timedOut)
+        var c = c
+        c.environment = (c.environment ?? [:]).merging(["PILOTBOAT_DRY_RUN": "1"]) { $1 }
+        return try await base.run(c)
     }
 }
 
@@ -58,75 +23,133 @@ func makeRequest(exe: String, localPath: String? = nil, policy: WorkspacePolicy 
     return LaunchRequest(runId: UUID(), subject: .pullRequest(pr), repository: RepositoryInfo(host: "github.com", fullName: "o/r", launcherBinding: binding), workspacePolicy: policy, prompt: prompt, launcherSettings: .object(settings))
 }
 
+func fake(_ results: [CommandResult]) -> FakeCommandRunner {
+    FakeCommandRunner(rules: results.map { (["/bin/x"], $0) })
+}
+
+func stdinJSON(_ c: Command) throws -> [String: Any] { try JSONSerialization.jsonObject(with: c.stdin!) as! [String: Any] }
+
 @Suite struct FakeRunnerTests {
     @Test func launchBuildsCommandAndDecodes() async throws {
-        let fake = FakeRunner(ok(#"{"workspaceRef":"/w","terminalHandle":null,"reusedWorkspace":true,"sentToExistingSession":false,"retryToken":"t2"}"#))
+        let runner = fake([ok(#"{"workspaceRef":"/w","terminalHandle":null,"reusedWorkspace":true,"sentToExistingSession":false,"retryToken":"t2"}"#)])
         var req = makeRequest(exe: "/bin/x", localPath: "/repo")
         req.retryToken = "t1"
-        let res = try await ScriptLauncher(runner: fake).launch(req)
+        let res = try await ScriptLauncher(runner: runner).launch(req)
         #expect(res.workspaceRef == "/w" && res.reusedWorkspace && res.terminalHandle == nil && res.retryToken == "t2")
-        let c = fake.commands[0]
+        let c = runner.calls[0]
         #expect(c.executable == "/bin/x" && c.arguments == ["launch"] && c.timeout == 120)
         #expect(c.environment == ["PILOTBOAT_RUN_ID": req.runId.uuidString])
-        let json = try JSONSerialization.jsonObject(with: c.stdin!) as! [String: Any]
+        let json = try stdinJSON(c)
+        #expect(json["version"] as? Int == 1)
         #expect(json["prompt"] as? String == "review it")
         #expect((json["repository"] as! [String: Any])["launcherBinding"] as? String == "/repo")
         #expect(json["workspacePolicy"] as? String == "alwaysNew")
         #expect(json["retryToken"] as? String == "t1")
     }
 
+    @Test func v1RequestKeepsTheFieldsCoreUsedToEncode() throws {
+        var req = makeRequest(exe: "/bin/x", binding: "/b")
+        req.previousWorkspaceRef = "/prev"; req.previousTerminalHandle = "term"; req.retryToken = "t"
+        var dto = try JSONSerialization.jsonObject(with: JSONEncoder().encode(ScriptLaunchRequestV1(req))) as! [String: Any]
+        let core = try JSONSerialization.jsonObject(with: JSONEncoder().encode(req)) as! [String: Any]
+        #expect(dto.removeValue(forKey: "version") as? Int == 1)
+        #expect(NSDictionary(dictionary: dto) == NSDictionary(dictionary: core))
+    }
+
+    @Test func resultWithoutOptionalFieldsDecodes() async throws {
+        let res = try await ScriptLauncher(runner: fake([ok(#"{"workspaceRef":"/w"}"#)])).launch(makeRequest(exe: "/bin/x"))
+        #expect(res.workspaceRef == "/w" && !res.reusedWorkspace && !res.sentToExistingSession && res.retryToken == nil && res.terminalHandle == nil)
+    }
+
+    @Test func settingsRoundTrip() {
+        let s = ScriptSettings(json: .object(["executable": .string("/bin/x"), "localPath": .string("/r"), "other": .bool(true)]))
+        #expect(s.executable == "/bin/x" && s.localPath == "/r")
+        #expect(s.json() == .object(["executable": .string("/bin/x"), "localPath": .string("/r")]))
+        #expect(ScriptSettings(json: .object(["executable": .number(1)])).executable == nil)
+        #expect(ScriptSettings(json: .object(["executable": .string("")])).resolvedExecutable == nil)
+    }
+
     @Test func failureCarriesStderrTail() async throws {
         let err = String(repeating: "a", count: 5000) + "END"
-        let fake = FakeRunner(CommandResult(exitCode: 3, stdout: Data(), stderr: Data(err.utf8)))
-        do { _ = try await ScriptLauncher(runner: fake).launch(makeRequest(exe: "/bin/x")); Issue.record("no throw") }
+        let runner = fake([CommandResult(exitCode: 3, stdout: Data(), stderr: Data(err.utf8))])
+        do { _ = try await ScriptLauncher(runner: runner).launch(makeRequest(exe: "/bin/x")); Issue.record("no throw") }
         catch let ScriptLauncherError.failed(code, tail) { #expect(code == 3 && tail.count == 4096 && tail.hasSuffix("END")) }
     }
 
     @Test func timeoutAndInvalidJSON() async throws {
-        let t = FakeRunner(CommandResult(exitCode: 15, stdout: Data(), stderr: Data(), timedOut: true))
+        let t = fake([CommandResult(exitCode: 15, stdout: Data(), stderr: Data(), timedOut: true)])
         await #expect(throws: ScriptLauncherError.timedOut) { try await ScriptLauncher(runner: t).launch(makeRequest(exe: "/bin/x")) }
-        let b = FakeRunner(ok("nope"))
+        let b = fake([ok("nope")])
         await #expect(throws: ScriptLauncherError.invalidOutput("nope")) { try await ScriptLauncher(runner: b).launch(makeRequest(exe: "/bin/x")) }
     }
 
-    @Test func missingExecutable() async {
-        await #expect(throws: ScriptLauncherError.missingExecutable) { try await ScriptLauncher(runner: FakeRunner(ok(""))).launch(makeRequest(exe: "")) }
+    @Test func errorsHaveDescriptions() {
+        #expect(ScriptLauncherError.failed(exitCode: 2, stderrTail: "boom").localizedDescription == "The launcher script exited with code 2.\nboom")
+        #expect(ScriptLauncherError.timedOut.localizedDescription == "The launcher script timed out.")
     }
 
-    @Test func localPathFallsBackIntoBinding() async throws {
-        let fake = FakeRunner(ok(#"{"workspaceRef":"/w","reusedWorkspace":false,"sentToExistingSession":false}"#))
-        _ = try await ScriptLauncher(runner: fake).launch(makeRequest(exe: "/bin/x", localPath: "/a", binding: "/b"))
-        let json = try JSONSerialization.jsonObject(with: fake.commands[0].stdin!) as! [String: Any]
+    @Test func missingExecutable() async {
+        await #expect(throws: ScriptLauncherError.missingExecutable) { try await ScriptLauncher(runner: fake([])).launch(makeRequest(exe: "")) }
+    }
+
+    @Test func bindingWinsOverLocalPath() async throws {
+        let runner = fake([ok(#"{"workspaceRef":"/w"}"#)])
+        _ = try await ScriptLauncher(runner: runner).launch(makeRequest(exe: "/bin/x", localPath: "/a", binding: "/b"))
+        let json = try stdinJSON(runner.calls[0])
         #expect((json["repository"] as! [String: Any])["launcherBinding"] as? String == "/b")
         #expect(((json["launcherSettings"] as! [String: Any])["localPath"]) as? String == "/a")
     }
 
-    @Test func capabilitiesDecodeAndUnion() async {
-        let fake = FakeRunner(ok(#"{"reuseWorkspace": true, "sendToSession": false}"#))
-        let l = ScriptLauncher(runner: fake)
-        #expect(l.capabilities.isEmpty)
-        #expect(await l.capabilities(executable: "/bin/x") == [.reuseWorkspace])
-        #expect(l.capabilities == [.reuseWorkspace])
+    @Test func capabilitiesDecodeAndCachePerExecutable() async {
+        let runner = fake([ok(#"{"reuseWorkspace": true, "sendToSession": false}"#)])
+        let l = ScriptLauncher(runner: runner)
+        #expect(await l.capabilities(settings: .object([:])).isEmpty)
+        #expect(await l.capabilities(settings: .object(["executable": .string("/bin/x")])) == [.reuseWorkspace])
         _ = await l.capabilities(executable: "/bin/x")
-        #expect(fake.commands.count == 1 && fake.commands[0].arguments == ["capabilities"])
+        #expect(runner.calls.count == 1 && runner.calls[0].arguments == ["capabilities"])
+    }
+
+    @Test func cachedCapabilitiesStayStaleWhenTheScriptChanges() async {
+        let runner = fake([ok(#"{"reuseWorkspace": false, "sendToSession": false}"#), ok(#"{"reuseWorkspace": true, "sendToSession": true}"#)])
+        let l = ScriptLauncher(runner: runner)
+        #expect(await l.capabilities(executable: "/bin/x").isEmpty)
+        #expect(await l.capabilities(executable: "/bin/x").isEmpty)
+        #expect(runner.calls.count == 1)
+        #expect(await ScriptLauncher(runner: runner).capabilities(executable: "/bin/x") == [.reuseWorkspace, .sendToSession])
+    }
+
+    @Test func failedCapabilitiesQueryIsNotCached() async {
+        let runner = fake([CommandResult(exitCode: 1, stdout: Data(), stderr: Data()), ok(#"{"reuseWorkspace": true, "sendToSession": true}"#)])
+        let l = ScriptLauncher(runner: runner)
+        #expect(await l.capabilities(executable: "/bin/x").isEmpty)
+        #expect(await l.capabilities(executable: "/bin/x") == [.reuseWorkspace, .sendToSession])
+        #expect(runner.calls.count == 2)
     }
 
     @Test func describeTruncatesPrompt() async {
-        let d = await ScriptLauncher(runner: FakeRunner(ok(""))).describe(makeRequest(exe: "/bin/x", prompt: String(repeating: "p", count: 500)))
+        let d = await ScriptLauncher(runner: fake([])).describe(makeRequest(exe: "/bin/x", prompt: String(repeating: "p", count: 500)))
         #expect(d.hasPrefix("/bin/x launch\n") && !d.contains(String(repeating: "p", count: 201)) && d.contains(String(repeating: "p", count: 200)))
     }
 
     @Test func openAndDiagnose() async throws {
-        let fake = FakeRunner(ok("all good\nsecond"))
-        let l = ScriptLauncher(runner: fake)
+        let runner = FakeCommandRunner(rules: [(["/bin/sh", "diagnose"], ok("all good\nsecond")), (["/bin/x", "open"], ok(""))])
+        let l = ScriptLauncher(runner: runner)
         let good = await l.diagnose(settings: .object(["executable": .string("/bin/sh")]))
         #expect(good.count == 1 && good[0].level == .ok && good[0].detail == "all good")
         #expect(await l.diagnose(settings: .object(["executable": .string("/nonexistent/x")])).map(\.level) == [.error])
         #expect(await l.diagnose(settings: .object([:])).map(\.level) == [.error])
         await #expect(throws: ScriptLauncherError.missingExecutable) { try await l.open("/w", settings: .object([:])) }
         try await l.open("/w", settings: .object(["executable": .string("/bin/x")]))
-        #expect(fake.commands.last!.executable == "/bin/x")
-        #expect(fake.commands.last!.arguments == ["open", "/w"])
+        #expect(runner.calls.last!.executable == "/bin/x")
+        #expect(runner.calls.last!.arguments == ["open", "/w"])
+        #expect(runner.calls.last!.timeout == 30)
+    }
+
+    @Test func openTimeout() async {
+        let runner = fake([CommandResult(exitCode: 15, stdout: Data(), stderr: Data(), timedOut: true)])
+        await #expect(throws: ScriptLauncherError.timedOut) {
+            try await ScriptLauncher(runner: runner).open("/w", settings: ScriptSettings(executable: "/bin/x").json())
+        }
     }
 }
 
@@ -145,7 +168,7 @@ func makeRequest(exe: String, localPath: String? = nil, policy: WorkspacePolicy 
 
     @Test func scriptsEndToEnd() async throws {
         let d = try tmp(); defer { try? FileManager.default.removeItem(at: d) }
-        let l = ScriptLauncher(runner: ProcessRunner())
+        let l = ScriptLauncher(runner: DryRunRunner())
         let good = try script(d, "good", #"cat >/dev/null; echo "{\"workspaceRef\":\"$PILOTBOAT_RUN_ID\",\"reusedWorkspace\":false,\"sentToExistingSession\":false}""#)
         let req = makeRequest(exe: good)
         #expect(try await l.launch(req).workspaceRef == req.runId.uuidString)
@@ -159,11 +182,20 @@ func makeRequest(exe: String, localPath: String? = nil, policy: WorkspacePolicy 
     @Test func timeoutMapsToTimedOut() async throws {
         let d = try tmp(); defer { try? FileManager.default.removeItem(at: d) }
         let slow = try script(d, "slow", "sleep 30")
-        let r = try await ProcessRunner().run(Command(slow, ["launch"], timeout: 0.3))
+        let r = try await DryRunRunner().run(Command(slow, ["launch"], timeout: 0.3))
         #expect(r.timedOut)
-        await #expect(throws: ScriptLauncherError.timedOut) {
-            try await ScriptLauncher(runner: TimeoutRunner()).launch(makeRequest(exe: slow))
-        }
+    }
+
+    @Test func scriptEnvironment() async throws {
+        let d = try tmp(); defer { try? FileManager.default.removeItem(at: d) }
+        let envFile = d.appendingPathComponent("env").path
+        let exe = try script(d, "env", #"cat >/dev/null; env > "\#(envFile)"; echo '{"workspaceRef":"/w"}'"#)
+        let req = makeRequest(exe: exe)
+        _ = try await ScriptLauncher(runner: DryRunRunner()).launch(req)
+        let lines = try String(contentsOfFile: envFile, encoding: .utf8).split(separator: "\n").map(String.init)
+        #expect(lines.contains("PILOTBOAT_RUN_ID=\(req.runId.uuidString)"))
+        #expect(lines.contains { $0.hasPrefix("PATH=") })
+        #expect(!lines.contains { $0.hasPrefix("GH_TOKEN=") || $0.hasPrefix("GITHUB_TOKEN=") })
     }
 
     @Test func sampleScriptCreatesWorktree() async throws {
@@ -191,11 +223,10 @@ func makeRequest(exe: String, localPath: String? = nil, policy: WorkspacePolicy 
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<3 { url.deleteLastPathComponent() }
         let exe = url.appendingPathComponent("contrib/launchers/git-worktree-terminal").path
-        let l = ScriptLauncher(runner: ProcessRunner())
+        let l = ScriptLauncher(runner: DryRunRunner())
         func real(_ p: String) -> String { URL(fileURLWithPath: p).resolvingSymlinksInPath().path }
         #expect(await l.capabilities(executable: exe) == [.reuseWorkspace])
 
-        setenv("PILOTBOAT_DRY_RUN", "1", 1)
         let new = try await l.launch(makeRequest(exe: exe, localPath: repo, policy: .alwaysNew, prompt: "it's \"quoted\" $(x)", headSHA: sha))
         #expect(real(new.workspaceRef) == real(d.appendingPathComponent("myrepo-worktrees/pr-7-review").path) && !new.reusedWorkspace)
         #expect(try sh(["git", "rev-parse", "HEAD"], cwd: new.workspaceRef) == sha)
@@ -218,8 +249,4 @@ func makeRequest(exe: String, localPath: String? = nil, policy: WorkspacePolicy 
         let fresh = try await l.launch(again)
         #expect(real(fresh.workspaceRef) == real(d.appendingPathComponent("myrepo-worktrees/pr-7-review-2").path) && !fresh.reusedWorkspace)
     }
-}
-
-struct TimeoutRunner: CommandRunner {
-    func run(_ c: Command) async throws -> CommandResult { CommandResult(exitCode: 15, stdout: Data(), stderr: Data(), timedOut: true) }
 }

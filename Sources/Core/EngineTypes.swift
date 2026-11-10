@@ -52,4 +52,6 @@ public enum EngineError: Error, Hashable, Sendable {
     case runNotFound(UUID)
     case invalidTransition(from: RunState)
     case unsupportedSubject
+    /// The app quit while the run was launching.
+    case interruptedLaunch
 }

@@ -84,22 +84,22 @@ public actor GitHubSource: EventSource {
             let rateLimit: RateLimitInfo?
         }
         let r: Response = try await makeClient().query(Self.pullRequestQuery, variables: ["owner": parts[1], "name": parts[2], "number": number])
-        try record(r.rateLimit)
+        record(r.rateLimit)
         guard let node = r.repository?.pullRequest else { throw GitHubError.graphQL(["Pull request not found"]) }
         return node.ref(host: host)
     }
 
     public func diagnose() async -> [DiagnosticItem] {
-        let title = String(localized: "GitHub (\(host))")
+        let title = "GitHub (\(host))"
         do {
             let login = try await viewerLogin(makeClient())
-            var items = [DiagnosticItem(level: .ok, title: title, detail: String(localized: "Signed in as \(login)"))]
+            var items = [DiagnosticItem(level: .ok, title: title, detail: "Signed in as \(login)")]
             if let rl = lastRateLimit, rl.isLow {
-                items.append(DiagnosticItem(level: .warning, title: String(localized: "GitHub rate limit"), detail: String(localized: "\(rl.remaining) of \(rl.limit) remaining")))
+                items.append(DiagnosticItem(level: .warning, title: "GitHub rate limit", detail: "\(rl.remaining) of \(rl.limit) remaining"))
             }
             return items
         } catch {
-            return [DiagnosticItem(level: .error, title: title, detail: error.localizedDescription)]
+            return [DiagnosticItem(level: .error, title: title, detail: TokenMasker.mask(error.localizedDescription))]
         }
     }
 
@@ -121,10 +121,8 @@ public actor GitHubSource: EventSource {
         return GraphQLClient(host: host, token: token, session: session, now: { [time] in time.now })
     }
 
-    private func record(_ rateLimit: RateLimitInfo?) throws {
-        guard let rateLimit else { return }
-        lastRateLimit = rateLimit
-        if rateLimit.isLow { throw GitHubError.rateLimited(until: rateLimit.resetAt) }
+    private func record(_ rateLimit: RateLimitInfo?) {
+        if let rateLimit { lastRateLimit = rateLimit }
     }
 
     private func search(_ client: GraphQLClient, _ query: String, q: String) async throws -> (viewer: String, nodes: [PRNode]) {
@@ -140,7 +138,7 @@ public actor GitHubSource: EventSource {
         var viewer = ""
         repeat {
             let r: Response = try await client.query(query, variables: ["q": q, "after": after])
-            try record(r.rateLimit)
+            record(r.rateLimit)
             viewer = r.viewer.login
             nodes += r.search.nodes
             after = r.search.pageInfo.hasNextPage ? r.search.pageInfo.endCursor : nil
@@ -158,38 +156,32 @@ public actor GitHubSource: EventSource {
     }
     """
 
-    static let reviewRequestedQuery = """
-    query($q: String!, $after: String) {
-      viewer { login }
-      rateLimit { limit remaining resetAt }
-      search(type: ISSUE, query: $q, first: 50, after: $after) {
-        pageInfo { hasNextPage endCursor }
-        nodes { ... on PullRequest {
-          ...PR
-          timelineItems(last: 20, itemTypes: [REVIEW_REQUESTED_EVENT]) {
-            nodes { ... on ReviewRequestedEvent {
-              createdAt
-              requestedReviewer { __typename ... on User { login } ... on Team { slug } }
+    static func searchQuery(extraFields: String) -> String {
+        """
+        query($q: String!, $after: String) {
+          viewer { login }
+          rateLimit { limit remaining resetAt }
+          search(type: ISSUE, query: $q, first: 50, after: $after) {
+            pageInfo { hasNextPage endCursor }
+            nodes { ... on PullRequest {
+              ...PR
+              \(extraFields)
             } }
           }
-        } }
-      }
+        }
+        """ + prFragment
     }
-    """ + prFragment
 
-    static let reviewSubmittedQuery = """
-    query($q: String!, $after: String) {
-      viewer { login }
-      rateLimit { limit remaining resetAt }
-      search(type: ISSUE, query: $q, first: 50, after: $after) {
-        pageInfo { hasNextPage endCursor }
-        nodes { ... on PullRequest {
-          ...PR
-          reviews(last: 50) { nodes { databaseId state submittedAt author { __typename login } } }
-        } }
-      }
+    static let reviewRequestedQuery = searchQuery(extraFields: """
+    timelineItems(last: 20, itemTypes: [REVIEW_REQUESTED_EVENT]) {
+      nodes { ... on ReviewRequestedEvent {
+        createdAt
+        requestedReviewer { __typename ... on User { login } ... on Team { slug } }
+      } }
     }
-    """ + prFragment
+    """)
+
+    static let reviewSubmittedQuery = searchQuery(extraFields: "reviews(last: 50) { nodes { databaseId state submittedAt author { __typename login } } }")
 
     static let pullRequestQuery = """
     query($owner: String!, $name: String!, $number: Int!) {

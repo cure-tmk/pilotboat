@@ -85,3 +85,23 @@ private func config(_ interval: Int) -> Config {
     try ConfigMigrations.migrate(json: &json)
     #expect(json["x"] as? Int == 1)
 }
+
+@Test func newerSchemaIsRejectedNotTreatedAsCorrupt() throws {
+    let dir = tempDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let newer = Config.currentSchemaVersion + 1
+    try Data(#"{"schemaVersion":\#(newer)}"#.utf8).write(to: dir.appendingPathComponent("config.json"))
+    #expect(throws: ConfigStoreError.newerSchema(found: newer)) { try FileConfigStore(directory: dir).load() }
+}
+
+@Test func migrationStepsUpgradeToTarget() throws {
+    var json: [String: Any] = ["schemaVersion": 1, "old": 7]
+    let steps: [ConfigMigrations.Step] = [
+        { $0["new"] = $0["old"]; $0["old"] = nil },
+        { $0["new"] = ($0["new"] as! Int) + 1 },
+    ]
+    try ConfigMigrations.migrate(json: &json, steps: steps, target: 3)
+    #expect(json["schemaVersion"] as? Int == 3 && json["new"] as? Int == 8 && json["old"] == nil)
+    #expect(throws: ConfigStoreError.newerSchema(found: 3)) { try ConfigMigrations.migrate(json: &json, steps: steps, target: 2) }
+}

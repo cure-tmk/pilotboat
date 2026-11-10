@@ -153,7 +153,7 @@ Four steps, progress dots, Back/Continue:
 
 - `RunStateBadge(run:)` — label + symbol + color per the table above.
 - `RunRow(run:)` — compact row used by popover and Activity.
-- `PullRequestTitle(ref:)` — "repo #number" + title styles.
+- `PullRequestTitle(run:)` — "repo #number" + title styles.
 - `StatusLine(status:)` — monitoring dot + text + last check.
 - `SectionCard` — `GroupBox` wrapper with a title and optional trailing control.
 - `Chip` / `ChipList` — small capsule tags for repositories and labels.

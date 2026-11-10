@@ -1,6 +1,5 @@
 import Core
 import LauncherOrca
-import LauncherScript
 import SwiftUI
 
 struct AutomationDraft: Equatable {
@@ -105,7 +104,7 @@ struct AutomationEditor: View {
         DisclosureGroup(isExpanded: $showsFilters) {
             // Review requests carry no reviewer, so the reviewer filter would never apply to them.
             if rule.eventKind != .reviewRequested {
-                Picker(selection: $draft.rule.reviewer) {
+                Picker(selection: $draft.rule.actorKind) {
                     Text("Anyone", bundle: .resources).tag(ActorKind.any)
                     Text("People only", bundle: .resources).tag(ActorKind.human)
                     Text("Bots only", bundle: .resources).tag(ActorKind.bot)
@@ -266,15 +265,7 @@ struct AutomationEditor: View {
 
     private func launcherCanReuse() async -> Bool {
         guard let launcher = model.config.launcher(id: rule.launcherId) else { return true }
-        switch launcher.type {
-        case OrcaLauncher.typeID:
-            return model.orcaLauncher.capabilities.contains(.reuseWorkspace)
-        case ScriptLauncher.typeID:
-            guard case .string(let executable)? = launcher.settings["executable"] else { return false }
-            return await model.scriptLauncher.capabilities(executable: executable).contains(.reuseWorkspace)
-        default:
-            return false
-        }
+        return await model.capabilities(of: launcher).contains(.reuseWorkspace)
     }
 }
 
@@ -296,36 +287,6 @@ private struct LabelField: View {
             if !labels.isEmpty {
                 ChipList(items: labels) { label in labels.removeAll { $0 == label } }
             }
-        }
-    }
-}
-
-fileprivate extension Rule {
-    var reviewer: ActorKind {
-        get { for case .actorKind(let kind) in conditions { return kind }; return .any }
-        set { replaceCondition(newValue == .any ? nil : .actorKind(newValue)) { if case .actorKind = $0 { true } else { false } } }
-    }
-
-    var includesDrafts: Bool {
-        get { for case .includeDraft(let include) in conditions { return include }; return true }
-        set { replaceCondition(newValue ? nil : .includeDraft(false)) { if case .includeDraft = $0 { true } else { false } } }
-    }
-
-    var requiredLabels: [String] {
-        get { for case .labelsInclude(let labels) in conditions { return labels }; return [] }
-        set { replaceCondition(newValue.isEmpty ? nil : .labelsInclude(newValue)) { if case .labelsInclude = $0 { true } else { false } } }
-    }
-
-    var excludedLabels: [String] {
-        get { for case .labelsExclude(let labels) in conditions { return labels }; return [] }
-        set { replaceCondition(newValue.isEmpty ? nil : .labelsExclude(newValue)) { if case .labelsExclude = $0 { true } else { false } } }
-    }
-
-    mutating func replaceCondition(_ condition: Condition?, matching: (Condition) -> Bool) {
-        if let index = conditions.firstIndex(where: matching) {
-            if let condition { conditions[index] = condition } else { conditions.remove(at: index) }
-        } else if let condition {
-            conditions.append(condition)
         }
     }
 }

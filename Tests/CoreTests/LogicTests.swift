@@ -26,8 +26,8 @@ import Testing
 @Suite struct PresetTests {
     @Test func installCreatesDisabledPresetsOnce() {
         var config = Config()
-        Presets.install(into: &config)
-        Presets.install(into: &config)
+        Presets.install(into: &config, launcherId: "orca")
+        Presets.install(into: &config, launcherId: "orca")
         #expect(config.rules.map(\.id) == [Presets.reviewRequestedId, Presets.reviewReceivedId])
         #expect(config.rules.allSatisfy { !$0.enabled && $0.executionMode == .auto })
         #expect(config.rules[0].conditions == [.includeDraft(false)] && config.rules[0].workspacePolicy == .reusePrevious)
@@ -38,7 +38,7 @@ import Testing
 
     @Test func upgradeRewritesOnlyUntouchedPresets() {
         var config = Config()
-        Presets.install(into: &config)
+        Presets.install(into: &config, launcherId: "orca")
         config.promptTemplates[1].body += " Edited."
         let bodies = Presets.bodies.mapValues { $0.merging([3: "v3"]) { a, _ in a } }
         Presets.upgrade(&config, bodies: bodies, to: 3)
@@ -50,7 +50,7 @@ import Testing
 
     @Test func upgradeFromVersionOneSkipsUnchangedBodies() {
         var config = Config()
-        Presets.install(into: &config)
+        Presets.install(into: &config, launcherId: "orca")
         for id in [Presets.reviewRequestedId, Presets.reviewReceivedId] {
             config.presetState[id] = PresetState(version: 1)
             config.promptTemplates[config.promptTemplates.firstIndex { $0.id == id }!].body = Presets.bodies[id]![1]! + " Edited."
@@ -126,5 +126,34 @@ import Testing
         #expect(try store.read { try $0.run(id: run.id) == nil && !$0.hasAnyBaseline() })
         try store.write { try $0.insertRun(run) }
         #expect(try store.read { try $0.recentRuns(limit: 5) } == [run])
+    }
+
+    @Test func rejectsWhatSQLiteRejects() throws {
+        let store = InMemoryStateStore()
+        let settling = Run(state: .settling, ruleId: "r", repo: "o/api", prNumber: 1, createdAt: startDate, updatedAt: startDate)
+        let event = reviewRequested(makePR(), at: startDate)
+        try store.write { try $0.insertRun(settling); try $0.attach(event, toRun: settling.id) }
+        #expect(throws: InMemoryStateStore.ConstraintViolation.self) { try store.write { try $0.insertRun(settling) } }
+        #expect(throws: InMemoryStateStore.ConstraintViolation.self) { try store.write { try $0.attach(event, toRun: settling.id) } }
+        var second = Run(state: .settling, ruleId: "r", repo: "o/api", prNumber: 1, createdAt: startDate, updatedAt: startDate)
+        #expect(throws: InMemoryStateStore.ConstraintViolation.self) { try store.write { try $0.insertRun(second) } }
+        second.state = .queued
+        try store.write { try $0.insertRun(second) }
+        second.state = .settling
+        #expect(throws: InMemoryStateStore.ConstraintViolation.self) { try store.write { try $0.updateRun(second) } }
+    }
+
+    @Test func ordersRunsByCreationThenInsertion() throws {
+        let store = InMemoryStateStore()
+        func run(_ created: TimeInterval, _ ref: String) -> Run {
+            Run(state: .launched, ruleId: ref, repo: "o/api", prNumber: 1, workspaceRef: ref, createdAt: startDate + created, updatedAt: startDate)
+        }
+        let (late, early, tie) = (run(10, "late"), run(0, "early"), run(10, "tie"))
+        try store.write { s in for r in [late, early, tie] { try s.insertRun(r) } }
+        try store.read { (s: any StateAccess) throws in
+            #expect(try s.recentRuns(limit: 3).map(\.ruleId) == ["tie", "late", "early"])
+            #expect(try s.runs(state: .launched).map(\.ruleId) == ["early", "late", "tie"])
+            #expect(try s.latestRunWithWorkspace(repo: "o/api", prNumber: 1)?.ruleId == "tie")
+        }
     }
 }

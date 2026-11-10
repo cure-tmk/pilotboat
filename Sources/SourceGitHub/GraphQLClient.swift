@@ -12,15 +12,15 @@ public enum GitHubError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .noToken: String(localized: "GitHub token is not set")
-        case .unauthorized: String(localized: "GitHub token is invalid or expired")
-        case .ssoRequired(let orgs) where orgs.isEmpty: String(localized: "Authorize the token for SAML SSO")
-        case .ssoRequired(let orgs): String(localized: "Authorize the token for SAML SSO: \(orgs.joined(separator: ", "))")
-        case .rateLimited(let until): String(localized: "GitHub rate limit reached until \(until.formatted(date: .omitted, time: .shortened))")
-        case .http(let status, _): String(localized: "GitHub returned HTTP \(status)")
+        case .noToken: "GitHub token is not set"
+        case .unauthorized: "GitHub token is invalid or expired"
+        case .ssoRequired(let orgs) where orgs.isEmpty: "Authorize the token for SAML SSO"
+        case .ssoRequired(let orgs): "Authorize the token for SAML SSO: \(orgs.joined(separator: ", "))"
+        case .rateLimited(let until): "GitHub rate limit reached until \(until.formatted(.iso8601))"
+        case .http(let status, _): "GitHub returned HTTP \(status)"
         case .graphQL(let messages): TokenMasker.mask(messages.joined(separator: "; "))
         case .network(let error): TokenMasker.mask(error.localizedDescription)
-        case .invalidURL: String(localized: "Not a pull request URL")
+        case .invalidURL: "Not a pull request URL"
         }
     }
 }
@@ -72,6 +72,7 @@ struct GraphQLClient: Sendable {
     func send(_ query: String, variables: [String: Any?]) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
+        request.timeoutInterval = 30
         request.setValue("bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Pilotboat", forHTTPHeaderField: "User-Agent")
@@ -87,6 +88,10 @@ struct GraphQLClient: Sendable {
         case 403 where http.value(forHTTPHeaderField: "X-GitHub-SSO") != nil:
             throw GitHubError.ssoRequired(orgs: Self.ssoOrgs(http.value(forHTTPHeaderField: "X-GitHub-SSO")!))
         case 403, 429:
+            if http.value(forHTTPHeaderField: "X-RateLimit-Remaining") == "0",
+               let reset = http.value(forHTTPHeaderField: "X-RateLimit-Reset").flatMap(TimeInterval.init) {
+                throw GitHubError.rateLimited(until: Date(timeIntervalSince1970: reset))
+            }
             if let seconds = http.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init) {
                 throw GitHubError.rateLimited(until: now().addingTimeInterval(seconds))
             }

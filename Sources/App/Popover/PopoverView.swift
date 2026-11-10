@@ -12,6 +12,9 @@ struct PopoverView: View {
                 if confirmingTurnOn { TurnOnConfirmation { confirmingTurnOn = false } } else { header }
             }
             .padding(12)
+            if model.lastErrorMessage != nil {
+                ErrorBanner(message: Bindable(model).lastErrorMessage).padding([.horizontal, .bottom], 12)
+            }
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
@@ -113,7 +116,7 @@ struct PopoverView: View {
     private func pause(_ duration: Duration) { Task { await model.pauseMonitoring(for: duration) } }
 }
 
-// Inline, not a sheet: a sheet on a MenuBarExtra window detaches from the panel or closes it.
+// Inline, not a sheet: a sheet attached to the transient popover detaches from it or closes it.
 private struct TurnOnConfirmation: View {
     @Environment(AppModel.self) private var model
     let done: () -> Void

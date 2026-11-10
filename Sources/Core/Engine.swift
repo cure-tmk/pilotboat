@@ -5,6 +5,9 @@ public actor Engine {
     static let maxSettle: TimeInterval = 600
     static let approvalTimeout: TimeInterval = 86_400
     static let unfinishedStates: [RunState] = [.settling, .pendingApproval, .queued, .held]
+    static let eventBufferSize = 100
+    /// Each check is one GitHub request per pending run, so it is spread out to spare the rate limit.
+    static let pullRequestCheckEveryTicks = 5
 
     public private(set) var config: Config
     public private(set) var status: EngineStatus
@@ -16,30 +19,39 @@ public actor Engine {
     private let sources: [String: any EventSource]
     private let launchers: [String: any Launcher]
     private let time: any TimeSource
+    private let describeError: @Sendable (any Error) -> String
     private var isTicking = false
     private var launchTasks: [UUID: Task<Void, Never>] = [:]
+    private var tickCount = 0
+    private var lastPullRequestCheck: [UUID: Int] = [:]
+    private var lastPurgeDay: Date
 
     /// - Parameters:
     ///   - sources: keyed by host (`github.com`).
     ///   - launchers: keyed by launcher `typeID`.
+    ///   - describeError: turns errors into the text stored on runs and shown as `status.lastError`.
     /// First-launch baselines are not set here so onboarding can call `completeFirstLaunch` with the user's
     /// choice; if it has not by the first `tick`, the tick sets them without carrying over review requests.
     public init(configStore: any ConfigStore, stateStore: any StateStore, sources: [String: any EventSource],
-                launchers: [String: any Launcher], time: any TimeSource = SystemTimeSource()) throws {
+                launchers: [String: any Launcher], time: any TimeSource = SystemTimeSource(),
+                describeError: @escaping @Sendable (any Error) -> String = { ($0 as? LocalizedError)?.errorDescription ?? String(describing: $0) }) throws {
         let config = try configStore.load()
         self.config = config
-        self.status = EngineStatus(monitoring: Self.monitoring(config.general))
-        (events, continuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(100))
+        self.status = EngineStatus(monitoring: RunPolicy.monitoring(config.general))
+        (events, continuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(Self.eventBufferSize))
         self.configStore = configStore
         self.stateStore = stateStore
         self.sources = sources
         self.launchers = launchers
         self.time = time
+        self.describeError = describeError
         let now = time.now
+        lastPurgeDay = Calendar.current.startOfDay(for: now)
+        let interrupted = describeError(EngineError.interruptedLaunch)
         try stateStore.write { s in
             for var run in try s.runs(state: .launching) {
                 run.state = .failed
-                run.error = "Pilotboat quit while launching"
+                run.error = interrupted
                 run.updatedAt = now
                 try s.updateRun(run)
             }
@@ -53,16 +65,24 @@ public actor Engine {
         guard !isTicking else { return .busy }
         isTicking = true
         defer { isTicking = false }
+        tickCount += 1
         var errors: [String] = []
 
+        let now = time.now
+        if Calendar.current.startOfDay(for: now) > lastPurgeDay {
+            do {
+                try stateStore.write { try $0.purgeProcessedEvents(before: now.addingTimeInterval(-Self.processedRetention)) }
+                lastPurgeDay = Calendar.current.startOfDay(for: now)
+            } catch { errors.append(describeError(error)) }
+        }
         do {
-            if !config.general.monitoring, let until = config.general.monitoringOffUntil, until <= time.now {
+            if !config.general.monitoring, let until = config.general.monitoringOffUntil, until <= now {
                 try apply { $0.general.monitoring = true; $0.general.monitoringOffUntil = nil }
             }
             if try !stateStore.read({ try $0.hasAnyBaseline() }) {
                 try completeFirstLaunch(includeExistingReviewRequests: false)
             }
-        } catch { errors.append("\(error)") }
+        } catch { errors.append(describeError(error)) }
 
         var openReviewRequests: [String: [PullRequestRef]] = [:]
         if config.general.monitoring {
@@ -72,13 +92,13 @@ public actor Engine {
                         openReviewRequests[host] = result.openReviewRequests
                         status.rateLimitRemaining = result.rateLimitRemaining
                     }
-                } catch { errors.append("\(host): \(error)") }
+                } catch { errors.append("\(host): \(describeError(error))") }
             }
         }
 
         let closed = await closedPendingRuns()
-        do { try advanceRuns(closedPendingRuns: closed) } catch { errors.append("\(error)") }
-        dispatch()
+        do { try advanceRuns(closedPendingRuns: closed) } catch { errors.append(describeError(error)) }
+        do { try dispatch() } catch { errors.append(describeError(error)) }
 
         status.lastTickAt = time.now
         status.lastError = errors.isEmpty ? nil : errors.joined(separator: "\n")
@@ -93,7 +113,7 @@ public actor Engine {
     /// `nil` when monitoring was turned off while polling; the result is then dropped and the cursor kept.
     private func poll(host: String, source: any EventSource) async throws -> PollResult? {
         let cursorKey = "\(type(of: source).typeID):\(host)"
-        let kinds = Set(config.rules.filter(\.enabled).map(\.eventKind)).intersection(source.supportedKinds)
+        let kinds = RunPolicy.coveredKinds(config).intersection(source.supportedKinds)
         let context = SourceContext(repositories: config.repositories.filter { $0.host == host && $0.monitoring },
                                     requestedKinds: kinds,
                                     cursor: try stateStore.read { try $0.cursor(sourceType: cursorKey) })
@@ -131,10 +151,14 @@ public actor Engine {
     /// Pending runs whose PR is no longer open; a run whose PR cannot be fetched is left alone.
     private func closedPendingRuns() async -> Set<UUID> {
         guard let pending = try? stateStore.read({ try $0.runs(state: .pendingApproval) }) else { return [] }
+        let pendingIds = Set(pending.map(\.id))
+        lastPullRequestCheck = lastPullRequestCheck.filter { pendingIds.contains($0.key) }
         var closed: Set<UUID> = []
         for run in pending {
-            guard let pr = run.snapshot?.subject.pullRequest, let source = sources[pr.host],
-                  let current = try? await source.pullRequest(url: pr.url), current.state != .open else { continue }
+            if let last = lastPullRequestCheck[run.id], tickCount - last < Self.pullRequestCheckEveryTicks { continue }
+            guard let pr = run.snapshot?.subject.pullRequest, let source = sources[pr.host] else { continue }
+            lastPullRequestCheck[run.id] = tickCount
+            guard let current = try? await source.pullRequest(url: pr.url), current.state != .open else { continue }
             closed.insert(run.id)
         }
         return closed
@@ -146,7 +170,10 @@ public actor Engine {
         let notices = try stateStore.write { s in
             var notices: [EngineEvent] = []
             for run in try s.runs(state: .settling) where (run.settleUntil ?? now) <= now {
-                notices.append(try Self.settle(run, config: config, now: now, viaApproval: true, s))
+                let (settled, notice) = RunPolicy.settle(run: run, events: try s.events(forRun: run.id), config: config, now: now,
+                                                         viaApproval: true, describeError: describeError)
+                try s.updateRun(settled)
+                notices.append(notice)
             }
             for var run in try s.runs(state: .pendingApproval) {
                 if now.timeIntervalSince(run.updatedAt) >= Self.approvalTimeout {
@@ -164,91 +191,38 @@ public actor Engine {
         emit(notices)
     }
 
-    /// Renders the snapshot of a run whose settle window ended and moves it on.
-    private static func settle(_ run: Run, config: Config, now: Date, viaApproval: Bool, _ s: any StateAccess) throws -> EngineEvent {
-        var run = run
-        run.updatedAt = now
-        let events = try s.events(forRun: run.id)
-        let notice: EngineEvent
-        if let rule = config.rule(id: run.ruleId), rule.enabled || !viaApproval {
-            if let latest = events.max(by: { $0.occurredAt < $1.occurredAt }), let template = config.promptTemplate(id: rule.promptTemplateId) {
-                run.snapshot = RunSnapshot(launcherId: rule.launcherId, workspacePolicy: rule.workspacePolicy,
-                                           renderedPrompt: PromptRenderer.render(template: template.body, events: events),
-                                           subject: latest.subject)
-                if latest.subject.pullRequest?.isCrossRepository == true {
-                    run.state = .skipped
-                    run.skipReason = .crossRepository
-                    notice = .runsChanged
-                } else if viaApproval && rule.executionMode == .confirm {
-                    run.state = .pendingApproval
-                    notice = .runNeedsApproval(run)
-                } else {
-                    run.state = .queued
-                    notice = .runsChanged
-                }
-            } else {
-                run.state = .failed
-                run.error = "Prompt template \(rule.promptTemplateId) not found"
-                notice = .runFailed(run)
-            }
-        } else {
-            run.state = .skipped
-            run.skipReason = .ruleRemoved
-            notice = .runsChanged
-        }
-        try s.updateRun(run)
-        return notice
-    }
-
     // MARK: Queue and launch
 
-    private func dispatch() {
+    private func dispatch() throws {
         let now = time.now
         let general = config.general
         let today = Calendar.current.startOfDay(for: now)
-        let result = Result {
-            try stateStore.write { s in
-                var launching = try s.runs(state: .launching)
-                let launchedToday = try s.countLaunched(since: today)
-                var started: [Run] = []
-                var notices: [EngineEvent] = []
-                let candidates = try (s.runs(state: .queued) + s.runs(state: .held).filter { $0.updatedAt < today })
-                    .sorted { $0.createdAt < $1.createdAt }
-                for var run in candidates {
-                    guard launching.count < general.maxConcurrentLaunches else { break }
-                    guard !launching.contains(where: { $0.repo == run.repo && $0.prNumber == run.prNumber }) else { continue }
-                    run.updatedAt = now
-                    if launchedToday >= general.dailyLaunchLimit {
-                        run.state = .held
-                        notices.append(.runHeld(run))
-                    } else if launchedToday + launching.count >= general.dailyLaunchLimit {
-                        // In-flight launches may still fail; each completion dispatches again.
-                        break
-                    } else {
-                        run.state = .launching
-                        launching.append(run)
-                        started.append(run)
-                        notices.append(.runsChanged)
-                    }
-                    try s.updateRun(run)
-                }
-                return (started, notices)
-            }
+        let plan = try stateStore.write { s in
+            let plan = RunPolicy.planDispatch(candidates: try s.runs(state: .queued) + s.runs(state: .held),
+                                              launching: try s.runs(state: .launching),
+                                              launchedToday: try s.countLaunched(since: today), general: general, now: now)
+            for run in plan.updates { try s.updateRun(run) }
+            return plan
         }
-        switch result {
-        case .failure(let error):
-            status.lastError = "\(error)"
-        case .success(let (started, notices)):
-            emit(notices)
-            for run in started { launchTasks[run.id] = Task { await self.launch(run) } }
-        }
+        emit(plan.notices)
+        for run in plan.started { launchTasks[run.id] = Task { await self.launch(run) } }
+    }
+
+    /// For dispatches outside `tick`, which counts failures itself.
+    private func dispatchReportingFailure() {
+        do { try dispatch() } catch { report(error) }
+    }
+
+    private func report(_ error: any Error) {
+        status.lastError = describeError(error)
+        continuation.yield(.statusChanged(status))
     }
 
     private func launch(_ run: Run) async {
         var run = run
         do {
             guard let snapshot = run.snapshot else { throw EngineError.invalidTransition(from: run.state) }
-            let (launcher, request) = try launchPlan(runId: run.id, snapshot: snapshot, retryToken: run.retryToken)
+            let (launcher, request) = try await launchPlan(runId: run.id, snapshot: snapshot, retryToken: run.retryToken)
             let result = try await launcher.launch(request)
             run.state = .launched
             run.workspaceRef = result.workspaceRef
@@ -258,23 +232,24 @@ public actor Engine {
             run.error = nil
         } catch {
             run.state = .failed
-            run.error = "\(error)"
+            run.error = describeError(error)
             if let error = error as? RetryableLaunchError { run.retryToken = error.retryToken }
         }
         run.updatedAt = time.now
-        do { try stateStore.write { try $0.updateRun(run) } } catch { status.lastError = "\(error)" }
+        do { try stateStore.write { try $0.updateRun(run) } } catch { report(error) }
         emit([run.state == .launched ? .runLaunched(run) : .runFailed(run)])
         launchTasks[run.id] = nil
-        dispatch()
+        dispatchReportingFailure()
     }
 
-    private func launchPlan(runId: UUID, snapshot: RunSnapshot, retryToken: String? = nil) throws -> (any Launcher, LaunchRequest) {
+    private func launchPlan(runId: UUID, snapshot: RunSnapshot, retryToken: String? = nil) async throws -> (any Launcher, LaunchRequest) {
         guard let launcherConfig = config.launcher(id: snapshot.launcherId), let launcher = launchers[launcherConfig.type] else {
             throw EngineError.launcherNotFound(snapshot.launcherId)
         }
         guard let pr = snapshot.subject.pullRequest else { throw EngineError.unsupportedSubject }
         let previous = try stateStore.read { try $0.latestRunWithWorkspace(repo: pr.repo, prNumber: pr.number) }
-        let policy: WorkspacePolicy = launcher.capabilities.contains(.reuseWorkspace) ? snapshot.workspacePolicy : .alwaysNew
+        let canReuse = await launcher.capabilities(settings: launcherConfig.settings).contains(.reuseWorkspace)
+        let policy: WorkspacePolicy = canReuse ? snapshot.workspacePolicy : .alwaysNew
         let binding = config.repository(host: pr.host, fullName: pr.repo)?.launcherBindings[launcherConfig.id]
         return (launcher, LaunchRequest(runId: runId, subject: snapshot.subject,
                                         repository: RepositoryInfo(host: pr.host, fullName: pr.repo, launcherBinding: binding),
@@ -326,26 +301,19 @@ public actor Engine {
         try transform(&new)
         guard new != old else { return }
         let now = time.now
-        var newlyCovered = Self.coveredKinds(new).subtracting(Self.coveredKinds(old))
-        if !old.general.includeTeamReviewRequests && new.general.includeTeamReviewRequests { newlyCovered.insert(.reviewRequested) }
+        let resumed = !old.general.monitoring && new.general.monitoring
         let anySkipped = try stateStore.write { s in
-            let resumed = !old.general.monitoring && new.general.monitoring
             for repo in new.repositories {
-                var kinds = newlyCovered
-                if resumed { kinds = EventKind.supported }
-                if let previous = old.repository(id: repo.id), previous.monitoring || !repo.monitoring {
-                    kinds.formUnion(previous.mutedEventKinds.subtracting(repo.mutedEventKinds))
-                } else {
-                    kinds = EventKind.supported
+                for kind in RunPolicy.baselineKinds(old: old, new: new, repo: repo, resumed: resumed) {
+                    try s.setBaseline(repoId: repo.id, kind: kind, at: now)
                 }
-                for kind in kinds { try s.setBaseline(repoId: repo.id, kind: kind, at: now) }
                 // distantPast, not absent: StateAccess cannot delete, and an earlier baseline would otherwise still block.
                 if resumed && includeExistingReviewRequests { try s.setBaseline(repoId: repo.id, kind: .reviewRequested, at: .distantPast) }
             }
             var anySkipped = false
             for state in Self.unfinishedStates {
-                for var run in try s.runs(state: state) where Self.outOfScope(run, old) == nil {
-                    guard let reason = Self.outOfScope(run, new) else { continue }
+                for var run in try s.runs(state: state) where RunPolicy.outOfScope(run, old) == nil {
+                    guard let reason = RunPolicy.outOfScope(run, new) else { continue }
                     run.state = .skipped
                     run.skipReason = reason
                     run.updatedAt = now
@@ -357,33 +325,15 @@ public actor Engine {
         }
         try configStore.save(new)
         config = new
-        status.monitoring = Self.monitoring(new.general)
+        status.monitoring = RunPolicy.monitoring(new.general)
         emit([.configChanged(new), .statusChanged(status)] + (anySkipped ? [.runsChanged] : []))
-    }
-
-    private static func coveredKinds(_ config: Config) -> Set<EventKind> {
-        Set(config.rules.filter(\.enabled).map(\.eventKind))
-    }
-
-    // ponytail: runs are matched to repositories by fullName only; add the host to Run if several hosts share names.
-    private static func outOfScope(_ run: Run, _ config: Config) -> SkipReason? {
-        guard let rule = config.rule(id: run.ruleId), rule.enabled else { return .ruleRemoved }
-        guard config.general.monitoring,
-              let repo = config.repositories.first(where: { $0.fullName == run.repo }),
-              repo.monitoring, !repo.mutedEventKinds.contains(rule.eventKind) else { return .monitoringOff }
-        return nil
-    }
-
-    private static func monitoring(_ general: GeneralSettings) -> EngineStatus.Monitoring {
-        if general.monitoring { return .on }
-        return general.monitoringOffUntil.map { .offUntil($0) } ?? .off
     }
 
     // MARK: Run actions
 
     public func approve(runId: UUID) throws {
         try transition(runId, from: [.pendingApproval]) { $0.state = .queued }
-        dispatch()
+        dispatchReportingFailure()
     }
 
     public func skip(runId: UUID) throws {
@@ -400,7 +350,7 @@ public actor Engine {
             $0.state = .queued
             $0.error = nil
         }
-        dispatch()
+        dispatchReportingFailure()
     }
 
     private func transition(_ runId: UUID, from states: [RunState], _ change: (inout Run) throws -> Void) throws {
@@ -426,7 +376,7 @@ public actor Engine {
         guard let template = config.promptTemplate(id: rule.promptTemplateId) else { throw EngineError.templateNotFound(rule.promptTemplateId) }
         let snapshot = RunSnapshot(launcherId: rule.launcherId, workspacePolicy: rule.workspacePolicy,
                                    renderedPrompt: PromptRenderer.render(template: template.body, events: [event]), subject: event.subject)
-        let (launcher, request) = try launchPlan(runId: UUID(), snapshot: snapshot)
+        let (launcher, request) = try await launchPlan(runId: UUID(), snapshot: snapshot)
         return DryRunReport(pullRequest: pr, mismatch: RuleMatcher.mismatch(of: rule, for: event, in: repo, config: config),
                             winningRule: winner, renderedPrompt: snapshot.renderedPrompt,
                             launcherDescription: await launcher.describe(request))
@@ -443,10 +393,13 @@ public actor Engine {
         let notice = try stateStore.write { s in
             try s.insertRun(run)
             try s.attach(event, toRun: run.id)
-            return try Self.settle(run, config: config, now: now, viaApproval: false, s)
+            let (settled, notice) = RunPolicy.settle(run: run, events: [event], config: config, now: now,
+                                                     viaApproval: false, describeError: describeError)
+            try s.updateRun(settled)
+            return notice
         }
         emit([notice])
-        dispatch()
+        dispatchReportingFailure()
         return try stateStore.read { try $0.run(id: run.id) } ?? run
     }
 

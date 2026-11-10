@@ -155,6 +155,20 @@ import Testing
         #expect(try configStore.load() == baseConfig())
     }
 
+    @Test func processedEventsArePurgedOnceADay() async throws {
+        let h = try Harness()
+        let event = reviewRequested(makePR(), at: startDate)
+        h.source.events = [event]
+        await h.tick()
+        h.source.events = []
+        h.clock.advance(Engine.processedRetention + 1)
+        await h.tick()
+        #expect(try h.store.read { try !$0.hasProcessed(dedupeKey: event.dedupeKey) })
+        try h.store.write { try $0.markProcessed(event, seenAt: startDate) }
+        await h.tick()
+        #expect(try h.store.read { try $0.hasProcessed(dedupeKey: event.dedupeKey) })
+    }
+
     @Test func newRepositoryGetsBaseline() async throws {
         let h = try Harness()
         await h.tick()
@@ -316,13 +330,23 @@ import Testing
 
         h.source.pullRequestStates = [pr.number: state]
         h.source.pullRequestError = FakeError(description: "offline")
-        await h.tick()
+        for _ in 0..<Engine.pullRequestCheckEveryTicks { await h.tick() }
         #expect(try await h.engine.pendingApprovalRuns().count == 1)
 
         h.source.pullRequestError = nil
-        await h.tick()
+        for _ in 0..<Engine.pullRequestCheckEveryTicks { await h.tick() }
         let run = try #require(try await h.runs().first)
         #expect(run.state == .skipped && run.skipReason == .prClosed)
+    }
+
+    @Test func pendingPullRequestIsCheckedEveryFewTicks() async throws {
+        let h = try confirmHarness()
+        await h.tick()
+        h.clock.advance(10)
+        h.source.events = [reviewRequested(makePR(), at: h.clock.now)]
+        await h.tick()
+        for _ in 0..<(2 * Engine.pullRequestCheckEveryTicks) { await h.tick() }
+        #expect(h.source.pullRequestCount == 2)
     }
 
     @Test func monitoringOffAndRuleDisableSkipUnfinishedRuns() async throws {
@@ -447,6 +471,56 @@ import Testing
         #expect(h.launcher.requests.map(\.runId) == [failed.id, failed.id])
     }
 
+    @Test func dispatchWriteFailureFailsTheTick() async throws {
+        let h = try Harness()
+        await h.tick()
+        h.clock.advance(10)
+        h.source.events = [reviewRequested(makePR(), at: h.clock.now)]
+        h.store.writesBeforeFailure = 2
+        #expect(await h.tick() == .failed(consecutiveFailures: 1))
+        #expect(await h.engine.status.lastError == "disk full")
+        #expect(h.launcher.requests.isEmpty)
+    }
+
+    @Test func dispatchFailureOutsideTickIsReported() async throws {
+        let h = try Harness { $0.rules[0].executionMode = .confirm }
+        await h.tick()
+        h.clock.advance(10)
+        h.source.events = [reviewRequested(makePR(), at: h.clock.now)]
+        await h.tick()
+        let pending = try #require(try await h.engine.pendingApprovalRuns().first)
+        h.store.writesBeforeFailure = 1
+        try await h.engine.approve(runId: pending.id)
+        #expect(await h.engine.status.lastError == "disk full")
+        #expect(h.launcher.requests.isEmpty)
+    }
+
+    @Test func launchWriteFailureIsReported() async throws {
+        let h = try Harness()
+        h.launcher.hold()
+        await h.tick()
+        h.clock.advance(10)
+        h.source.events = [reviewRequested(makePR(), at: h.clock.now)]
+        _ = await h.engine.tick()
+        var stream = h.engine.events.makeAsyncIterator()
+        h.store.failWrites = true
+        h.launcher.release()
+        await h.engine.waitForLaunches()
+        #expect(await h.engine.status.lastError == "disk full")
+        var reported = false
+        while let event = await stream.next() {
+            if case .statusChanged(let status) = event, status.lastError == "disk full" { reported = true; break }
+        }
+        #expect(reported)
+    }
+
+    @Test func launchErrorUsesLocalizedDescription() async throws {
+        let h = try Harness()
+        h.launcher.failNext(with: FakeLocalizedError.broken)
+        await queue(h, prs: [makePR()])
+        #expect(try await h.runs().first?.error == "Readable message")
+    }
+
     @Test func retryableFailureKeepsTokenForRetry() async throws {
         let h = try Harness { $0.launchers[0].settings = .object(["x": .string("y")]) }
         h.launcher.failNext("lost", retryToken: "launch:op_9")
@@ -467,6 +541,19 @@ import Testing
         try h.store.write { try $0.insertRun(Run(state: .launching, ruleId: "rr", repo: "o/api", prNumber: 1, createdAt: startDate, updatedAt: startDate)) }
         _ = try h.restartedEngine()
         #expect(try await h.runs().first?.state == .failed)
+    }
+
+    @Test(arguments: [false, true])
+    func workspacePolicyFollowsLauncherCapabilities(canReuse: Bool) async throws {
+        let h = try Harness(launcher: FakeLauncher(capabilities: canReuse ? [.reuseWorkspace] : [])) { $0.rules[0].workspacePolicy = .reusePrevious }
+        await h.tick()
+        h.clock.advance(10)
+        h.source.events = [reviewRequested(makePR(number: 1), at: h.clock.now), reviewSubmitted(makePR(number: 2), id: 1, at: h.clock.now)]
+        await h.tick()
+        h.clock.advance(120)
+        await h.tick()
+        let policies = h.launcher.requests.sorted { $0.subject.pullRequest!.number < $1.subject.pullRequest!.number }.map(\.workspacePolicy)
+        #expect(policies == (canReuse ? [.reusePrevious, .reuseOrCreate] : [.alwaysNew, .alwaysNew]))
     }
 
     @Test func reuseFallsBackToAlwaysNewAndPassesPreviousWorkspace() async throws {

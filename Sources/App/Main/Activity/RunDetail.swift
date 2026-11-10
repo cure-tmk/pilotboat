@@ -54,10 +54,8 @@ struct RunDetail: View {
             if events.isEmpty {
                 Text("No events recorded", bundle: .resources).foregroundStyle(.secondary)
             }
-            let reviews = events.filter { $0.kind == .reviewSubmitted }
-            if let last = reviews.map(\.occurredAt).max() {
-                let names = Array(NSOrderedSet(array: reviews.compactMap(\.actor?.login))).compactMap { $0 as? String }
-                line(Text("\(reviews.count) reviews from \(names.formatted())", bundle: .resources), date: last)
+            if let summary = events.reviewSummary {
+                line(Text("\(summary.count) reviews from \(summary.reviewers.formatted())", bundle: .resources), date: summary.last)
             }
             ForEach(Array(events.filter { $0.kind != .reviewSubmitted }.enumerated()), id: \.offset) { _, event in
                 HStack {
@@ -112,5 +110,22 @@ struct RunDetail: View {
                 }
             }
         }
+    }
+}
+
+struct ReviewSummary: Equatable {
+    var count: Int
+    /// Reviewer logins in order of first review, without repeats.
+    var reviewers: [String]
+    var last: Date
+}
+
+extension [Event] {
+    var reviewSummary: ReviewSummary? {
+        let reviews = filter { $0.kind == .reviewSubmitted }
+        guard let last = reviews.map(\.occurredAt).max() else { return nil }
+        var seen = Set<String>()
+        let reviewers = reviews.compactMap(\.actor?.login).filter { seen.insert($0).inserted }
+        return ReviewSummary(count: reviews.count, reviewers: reviewers, last: last)
     }
 }

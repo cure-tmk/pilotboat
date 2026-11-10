@@ -9,7 +9,7 @@ struct GeneralTab: View {
 
     private func binding<T: Sendable>(_ keyPath: WritableKeyPath<GeneralSettings, T> & Sendable) -> Binding<T> {
         Binding(get: { model.config.general[keyPath: keyPath] },
-                set: { value in Task { await model.updateConfig { $0.general[keyPath: keyPath] = value } } })
+                set: { value in model.edit { $0.general[keyPath: keyPath] = value } })
     }
 
     private var intervals: [Int] { Array(Set([60, 120, 300, 600, 900, general.pollIntervalSeconds])).sorted() }
@@ -39,7 +39,7 @@ struct GeneralTab: View {
                 Toggle(isOn: binding(\.includeTeamReviewRequests)) { Text("Include requests sent to my teams", bundle: .resources) }
                 ForEach(general.excludedActors, id: \.self) { login in
                     LabeledContent(login) {
-                        Button { Task { await model.updateConfig { $0.general.excludedActors.removeAll { $0 == login } } } } label: {
+                        Button { model.edit { $0.general.excludedActors.removeAll { $0 == login } } } label: {
                             Image(systemName: "minus.circle")
                         }
                         .buttonStyle(.borderless)
@@ -51,7 +51,7 @@ struct GeneralTab: View {
                         let login = newActor.trimmingCharacters(in: .whitespaces)
                         newActor = ""
                         guard !login.isEmpty, !general.excludedActors.contains(login) else { return }
-                        Task { await model.updateConfig { $0.general.excludedActors.append(login) } }
+                        model.edit { $0.general.excludedActors.append(login) }
                     }
             } header: { Text("Review requests", bundle: .resources) }
             footer: { Text("Ignore reviews from", bundle: .resources) }

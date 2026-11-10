@@ -17,7 +17,7 @@ open)
 launch)
   req=$(cat)
   pr='.subject.pullRequest'
-  local_path=$(jq -r '.launcherSettings.localPath // .repository.launcherBinding // empty' <<<"$req")
+  local_path=$(jq -r '.repository.launcherBinding // .launcherSettings.localPath // empty' <<<"$req")
   [[ -n "$local_path" ]] || { echo "localPath is not configured" >&2; exit 2; }
   policy=$(jq -r .workspacePolicy <<<"$req")
   number=$(jq -r "$pr.number" <<<"$req")

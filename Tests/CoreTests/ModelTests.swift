@@ -39,3 +39,14 @@ import Testing
     let decoded = try JSONDecoder().decode(PullRequestRef.self, from: JSONSerialization.data(withJSONObject: legacy))
     #expect(decoded == pr && decoded.state == .open)
 }
+
+@Test func jsonValueAccessorsAndCodableRoundTrip() throws {
+    struct Settings: Codable, Equatable { var agent: String; var activate: Bool; var tags: [String] }
+    let settings = Settings(agent: "claude", activate: true, tags: ["a"])
+    let value = try JSONValue(encoding: settings)
+    #expect(value["agent"]?.string == "claude" && value["activate"]?.bool == true)
+    #expect(value["tags"]?.array == [.string("a")] && value.object?.count == 3)
+    #expect(value["agent"]?.bool == nil && value["missing"] == nil && JSONValue.null.object == nil)
+    #expect(try value.decode(Settings.self) == settings)
+    #expect(throws: DecodingError.self) { try JSONValue.string("x").decode(Settings.self) }
+}

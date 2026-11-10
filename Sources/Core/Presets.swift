@@ -26,7 +26,7 @@ public enum Presets {
         Ask me before committing, pushing, or replying to any review comment.
         """
 
-    public static func install(into config: inout Config, launcherId: LauncherID = "orca") {
+    public static func install(into config: inout Config, launcherId: LauncherID) {
         let presets: [(PromptTemplate, Rule)] = [
             (PromptTemplate(id: reviewRequestedId, name: "Review requested", body: bodies[reviewRequestedId]![currentVersion]!),
              Rule(id: reviewRequestedId, name: "Review requested", priority: 0, eventKind: .reviewRequested,

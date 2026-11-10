@@ -31,7 +31,7 @@ public enum RuleMismatch: Hashable, Sendable {
 public enum RuleMatcher {
     /// Enabled rules applicable to `event` in `repo`, best first. Equal priority falls back to config order,
     /// which is creation order unless the user reorders rules.
-    public static func candidates(for event: Event, in repo: Repository, rules: [Rule]) -> [Rule] {
+    static func candidates(for event: Event, in repo: Repository, rules: [Rule]) -> [Rule] {
         ranked(rules.filter { $0.enabled && $0.eventKind == event.kind && $0.repoScope.contains(repo) && satisfies($0.conditions, event) })
     }
 
@@ -66,11 +66,11 @@ public enum RuleMatcher {
         return .conditional(Array(rules[..<end]))
     }
 
-    public static func satisfies(_ conditions: [Condition], _ event: Event) -> Bool {
+    static func satisfies(_ conditions: [Condition], _ event: Event) -> Bool {
         conditions.allSatisfy { satisfies($0, event) }
     }
 
-    public static func satisfies(_ condition: Condition, _ event: Event) -> Bool {
+    static func satisfies(_ condition: Condition, _ event: Event) -> Bool {
         let pr = event.subject.pullRequest
         let labels = Set((pr?.labels ?? []).map { $0.lowercased() })
         switch condition {
@@ -88,7 +88,7 @@ public enum RuleMatcher {
         }
     }
 
-    private static func ranked(_ rules: [Rule]) -> [Rule] {
+    static func ranked(_ rules: [Rule]) -> [Rule] {
         rules.enumerated().sorted { ($0.element.priority, -$0.offset) > ($1.element.priority, -$1.offset) }.map(\.element)
     }
 }

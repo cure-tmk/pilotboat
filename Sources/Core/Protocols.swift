@@ -87,7 +87,8 @@ public protocol RetryableLaunchError: Error {
 
 public protocol Launcher: Sendable {
     static var typeID: String { get }
-    var capabilities: LauncherCapabilities { get }
+    /// What the launcher configured with `settings` supports; reuse policies fall back to `alwaysNew` without `.reuseWorkspace`.
+    func capabilities(settings: JSONValue) async -> LauncherCapabilities
     func launch(_ request: LaunchRequest) async throws -> LaunchResult
     /// Human-readable description of what `launch` would run, without side effects (dry run).
     func describe(_ request: LaunchRequest) async -> String

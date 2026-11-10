@@ -72,6 +72,11 @@ struct MainWindow: View {
             case .health: HealthPage()
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if model.lastErrorMessage != nil {
+                ErrorBanner(message: Bindable(model).lastErrorMessage).padding(.horizontal, 16).padding(.top, 8)
+            }
+        }
         .frame(minWidth: 820, minHeight: 520)
         .navigationTitle(router.section.title)
     }

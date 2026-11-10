@@ -4,15 +4,20 @@ import Foundation
 public enum ConfigStoreError: Error, Equatable {
     case corrupt(path: String, backupAvailable: Bool)
     case noBackup
+    /// Written by a newer Pilotboat; loading it would drop what this version does not know.
+    case newerSchema(found: Int)
 }
 
 enum ConfigMigrations {
-    /// Index i upgrades schemaVersion i+1 to i+2. Add one function per bump.
-    static let steps: [@Sendable (inout [String: Any]) throws -> Void] = []
+    typealias Step = @Sendable (inout [String: Any]) throws -> Void
 
-    static func migrate(json: inout [String: Any]) throws {
+    /// Index i upgrades schemaVersion i+1 to i+2. Add one function per bump.
+    static let steps: [Step] = []
+
+    static func migrate(json: inout [String: Any], steps: [Step] = steps, target: Int = Config.currentSchemaVersion) throws {
         var version = json["schemaVersion"] as? Int ?? 1
-        while version < Config.currentSchemaVersion, version - 1 < steps.count {
+        guard version <= target else { throw ConfigStoreError.newerSchema(found: version) }
+        while version < target, version - 1 < steps.count {
             try steps[version - 1](&json)
             version += 1
             json["schemaVersion"] = version
@@ -29,7 +34,7 @@ public struct FileConfigStore: ConfigStore {
 
     public func load() throws -> Config {
         guard FileManager.default.fileExists(atPath: url.path) else { return Config() }
-        do { return try Self.decode(Data(contentsOf: url)) } catch {
+        do { return try Self.decode(Data(contentsOf: url)) } catch let error as ConfigStoreError { throw error } catch {
             throw ConfigStoreError.corrupt(path: url.path, backupAvailable: (try? Self.decode(Data(contentsOf: backupURL))) != nil)
         }
     }
@@ -40,29 +45,33 @@ public struct FileConfigStore: ConfigStore {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        // A corrupt current file must not overwrite a good backup.
+        if (try? Self.decode(Data(contentsOf: url))) != nil {
+            try install(copyOf: url, at: backupURL)
+        }
         let tmp = directory.appendingPathComponent("config.json.tmp")
         try encoder.encode(config).write(to: tmp)
-        if fm.fileExists(atPath: url.path) {
-            // A corrupt current file must not overwrite a good backup.
-            if (try? Self.decode(Data(contentsOf: url))) != nil {
-                try? fm.removeItem(at: backupURL)
-                try fm.copyItem(at: url, to: backupURL)
-            }
-            _ = try fm.replaceItemAt(url, withItemAt: tmp)
-        } else {
-            try fm.moveItem(at: tmp, to: url)
-        }
+        try install(tmp, at: url)
     }
 
     @discardableResult
     public func restoreFromBackup() throws -> Config {
         guard let config = try? Self.decode(Data(contentsOf: backupURL)) else { throw ConfigStoreError.noBackup }
-        let fm = FileManager.default
-        let tmp = directory.appendingPathComponent("config.json.tmp")
-        try? fm.removeItem(at: tmp)
-        try fm.copyItem(at: backupURL, to: tmp)
-        if fm.fileExists(atPath: url.path) { _ = try fm.replaceItemAt(url, withItemAt: tmp) } else { try fm.moveItem(at: tmp, to: url) }
+        try install(copyOf: backupURL, at: url)
         return config
+    }
+
+    private func install(copyOf source: URL, at destination: URL) throws {
+        let tmp = destination.appendingPathExtension("tmp")
+        try? FileManager.default.removeItem(at: tmp)
+        try FileManager.default.copyItem(at: source, to: tmp)
+        try install(tmp, at: destination)
+    }
+
+    /// Atomically puts `tmp` at `destination`, so a crash leaves either the old or the new file.
+    private func install(_ tmp: URL, at destination: URL) throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: destination.path) { _ = try fm.replaceItemAt(destination, withItemAt: tmp) } else { try fm.moveItem(at: tmp, to: destination) }
     }
 
     private static func decode(_ data: Data) throws -> Config {

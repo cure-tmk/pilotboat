@@ -5,8 +5,18 @@ import UniformTypeIdentifiers
 
 struct DataTab: View {
     @Environment(AppModel.self) private var model
-    @State private var pendingImport: URL?
-    @State private var summary: String?
+    @State private var pendingImport: PendingImport?
+    @State private var summary: ImportSummary?
+
+    private struct PendingImport: Identifiable {
+        let url: URL
+        var id: URL { url }
+    }
+
+    private struct ImportSummary: Identifiable {
+        let text: String
+        var id: String { text }
+    }
 
     var body: some View {
         Form {
@@ -34,45 +44,40 @@ struct DataTab: View {
             }
         }
         .formStyle(.grouped)
-        .sheet(isPresented: Binding(get: { pendingImport != nil }, set: { if !$0 { pendingImport = nil } })) {
+        .sheet(item: $pendingImport) { pending in
             VStack(alignment: .leading, spacing: 16) {
                 Text("Import settings", bundle: .resources).font(.headline)
                 Text("Automations and instructions that already exist here can be overwritten, or both versions can be kept", bundle: .resources)
                 HStack {
                     Spacer()
                     Button(role: .cancel) { pendingImport = nil } label: { Text("Cancel", bundle: .resources) }.keyboardShortcut(.cancelAction)
-                    Button { runImport(.rename) } label: { Text("Keep both", bundle: .resources) }
-                    Button { runImport(.overwrite) } label: { Text("Overwrite", bundle: .resources) }.keyboardShortcut(.defaultAction)
+                    Button { runImport(pending.url, .rename) } label: { Text("Keep both", bundle: .resources) }
+                    Button { runImport(pending.url, .overwrite) } label: { Text("Overwrite", bundle: .resources) }.keyboardShortcut(.defaultAction)
                 }
             }
             .padding(20)
             .frame(width: 420)
         }
-        .alert(String(localized: "Import settings", bundle: .resources), isPresented: Binding(get: { summary != nil }, set: { if !$0 { summary = nil } })) {
+        .alert(String(localized: "Import settings", bundle: .resources), isPresented: Binding(get: { summary != nil }, set: { if !$0 { summary = nil } }),
+               presenting: summary) { _ in
             Button(String(localized: "OK", bundle: .resources)) {}
-        } message: { Text(summary ?? "") }
+        } message: { Text($0.text) }
     }
 
     private func export() {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "pilotboat-settings.json"
-        panel.allowedContentTypes = [.json]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let url = Panel.save(name: "pilotboat-settings.json", types: [.json]) else { return }
         Task { await model.exportConfig(to: url) }
     }
 
     private func chooseImport() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.json]
-        if panel.runModal() == .OK { pendingImport = panel.url }
+        pendingImport = Panel.open(types: [.json]).map(PendingImport.init)
     }
 
-    private func runImport(_ policy: ImportConflictPolicy) {
-        guard let url = pendingImport else { return }
+    private func runImport(_ url: URL, _ policy: ImportConflictPolicy) {
         pendingImport = nil
         Task {
             do {
-                let result = try await model.importConfig(from: url, policy: policy)
+                guard let result = try await model.importConfig(from: url, policy: policy) else { return }
                 var lines = [String(localized: "Settings imported", bundle: .resources)]
                 let names = Set(result.conflicts.map { id in result.config.rule(id: id)?.name ?? result.config.promptTemplate(id: id)?.name ?? id }).sorted()
                 if !names.isEmpty {
@@ -82,8 +87,8 @@ struct DataTab: View {
                 if !result.launchersNeedingExecutable.isEmpty {
                     lines.append(String(localized: "Choose an executable in Launchers for: \(result.launchersNeedingExecutable.joined(separator: ", "))", bundle: .resources))
                 }
-                summary = lines.joined(separator: "\n")
-            } catch { summary = error.localizedDescription }
+                summary = ImportSummary(text: lines.joined(separator: "\n"))
+            } catch { summary = ImportSummary(text: error.localizedDescription) }
         }
     }
 }

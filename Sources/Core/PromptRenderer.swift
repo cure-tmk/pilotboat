@@ -6,13 +6,13 @@ public enum PromptRenderer {
     ]
     public static let reviewVariables = ["review.author", "review.state", "review.isBot", "review.count"]
     /// Variables whose values a third party controls, so using them allows prompt injection.
-    public static let untrustedVariables: Set<String> = ["pr.title"]
+    static let untrustedVariables: Set<String> = ["pr.title"]
 
     public static func variables(for kind: EventKind) -> [String] {
         kind == .reviewSubmitted ? commonVariables + reviewVariables : commonVariables
     }
 
-    public static func referencedVariables(in template: String) -> [String] {
+    static func referencedVariables(in template: String) -> [String] {
         var seen = Set<String>()
         return template.matches(of: pattern).map { String($0.output.1) }.filter { seen.insert($0).inserted }
     }

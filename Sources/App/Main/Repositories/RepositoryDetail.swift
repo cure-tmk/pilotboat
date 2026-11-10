@@ -20,7 +20,7 @@ struct RepositoryDetail: View {
             } header: { Text("Automations here", bundle: .resources) }
             Section {
                 ForEach(model.config.launchers) { launcher in
-                    if launcher.type == "orca" {
+                    if launcher.type == OrcaLauncher.typeID {
                         OrcaBindingRow(repo: repo, launcher: launcher, showId: model.config.launchers.count > 1)
                     } else {
                         ScriptBindingRow(repo: repo, launcher: launcher)
@@ -34,7 +34,7 @@ struct RepositoryDetail: View {
 
     private func update(_ change: @escaping @Sendable (inout Repository) -> Void) {
         let id = repo.id
-        Task { await model.updateConfig { config in if let i = config.repositories.firstIndex(where: { $0.id == id }) { change(&config.repositories[i]) } } }
+        model.edit { config in if let i = config.repositories.firstIndex(where: { $0.id == id }) { change(&config.repositories[i]) } }
     }
 
     private func applying(_ cell: OverviewCell) -> Rule? {
@@ -74,22 +74,11 @@ struct RepositoryDetail: View {
     }
 
     private func customize(_ rule: Rule) {
-        var copy = rule
-        copy.id = UUID().uuidString
-        copy.name += " (repo)"
-        copy.priority = (model.config.rules.map(\.priority).max() ?? 0) + 1
-        copy.repoScope = .only([repo.id])
-        var template = model.config.promptTemplate(id: rule.promptTemplateId)
-        template?.id = UUID().uuidString
-        template?.name += " (repo)"
-        if let template { copy.promptTemplateId = template.id }
-        let (newRule, newTemplate) = (copy, template)
-        Task {
-            await model.updateConfig { config in
-                if let newTemplate { config.promptTemplates.append(newTemplate) }
-                config.rules.append(newRule)
-            }
-            model.router.show(section: .automations, automationId: newRule.id)
+        let (ruleId, repoId) = (rule.id, repo.id)
+        let suffix = String(localized: " (this repository)", bundle: .resources)
+        let (newId, newTemplateId) = (UUID().uuidString, UUID().uuidString)
+        if model.edit({ $0.customizeRule(id: ruleId, forRepository: repoId, nameSuffix: suffix, newId: newId, newTemplateId: newTemplateId) }) != nil {
+            model.router.show(section: .automations, automationId: newId)
         }
     }
 }
@@ -115,12 +104,12 @@ private struct OrcaBindingRow: View {
                 Text(path).font(.caption).foregroundStyle(.secondary)
             }
         }
-        .task { repos = (try? await model.orcaRepos(launcherId: launcher.id)) ?? [] }
+        .task { repos = (try? await model.orca.repos(launcherId: launcher.id)) ?? [] }
     }
 
     private func set(_ id: String?) {
         let (repoId, launcherId) = (repo.id, launcher.id)
-        Task { await model.updateConfig { config in if let i = config.repositories.firstIndex(where: { $0.id == repoId }) { config.repositories[i].launcherBindings[launcherId] = id } } }
+        model.edit { config in if let i = config.repositories.firstIndex(where: { $0.id == repoId }) { config.repositories[i].launcherBindings[launcherId] = id } }
     }
 }
 
@@ -135,7 +124,7 @@ private struct ScriptBindingRow: View {
         LabeledContent(String(localized: "Local checkout (\(launcher.id))", bundle: .resources)) {
             HStack {
                 Text(path ?? String(localized: "Not set", bundle: .resources)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                Button { if let chosen = chooseFile(directories: true) { set(chosen) } } label: { Text("Choose…", bundle: .resources) }
+                Button { if let chosen = Panel.open(directories: true) { set(chosen.path) } } label: { Text("Choose…", bundle: .resources) }
                 if path != nil { Button { set(nil) } label: { Image(systemName: "xmark.circle") }.buttonStyle(.borderless).accessibilityLabel(Text("Clear", bundle: .resources)) }
             }
         }
@@ -143,6 +132,6 @@ private struct ScriptBindingRow: View {
 
     private func set(_ value: String?) {
         let (repoId, launcherId) = (repo.id, launcher.id)
-        Task { await model.updateConfig { config in if let i = config.repositories.firstIndex(where: { $0.id == repoId }) { config.repositories[i].launcherBindings[launcherId] = value } } }
+        model.edit { config in if let i = config.repositories.firstIndex(where: { $0.id == repoId }) { config.repositories[i].launcherBindings[launcherId] = value } }
     }
 }

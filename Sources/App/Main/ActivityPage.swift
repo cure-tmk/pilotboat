@@ -16,14 +16,6 @@ struct ActivityPage: View {
                 case .failed: run.state == .failed
                 }
             }
-            .sorted { $0.updatedAt > $1.updatedAt }
-    }
-
-    private var days: [(day: Date, runs: [Run])] {
-        let calendar = Calendar.current
-        return Dictionary(grouping: runs) { calendar.startOfDay(for: $0.updatedAt) }
-            .map { (day: $0.key, runs: $0.value) }
-            .sorted { $0.day > $1.day }
     }
 
     var body: some View {
@@ -42,8 +34,8 @@ struct ActivityPage: View {
                     emptyState.frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     List(selection: $router.runId) {
-                        ForEach(days, id: \.day) { group in
-                            Section(dayTitle(group.day)) {
+                        ForEach(runs.groupedByDay(), id: \.day) { group in
+                            Section(group.title) {
                                 ForEach(group.runs) { run in
                                     RunRow(run: run, showsDetails: true).tag(run.id)
                                 }
@@ -76,11 +68,26 @@ struct ActivityPage: View {
     private func empty(_ title: Text, _ symbol: String) -> some View {
         ContentUnavailableView { Label { title } icon: { Image(systemName: symbol) } }
     }
+}
 
-    private func dayTitle(_ day: Date) -> String {
-        let calendar = Calendar.current
-        if calendar.isDateInToday(day) { return String(localized: "Today", bundle: .resources) }
-        if calendar.isDateInYesterday(day) { return String(localized: "Yesterday", bundle: .resources) }
-        return day.formatted(date: .long, time: .omitted)
+struct RunDay {
+    let day: Date
+    let title: String
+    let runs: [Run]
+}
+
+extension [Run] {
+    /// Newest day first, runs newest first; days are titled Today, Yesterday or the date.
+    func groupedByDay(calendar: Calendar = .current, now: Date = Date()) -> [RunDay] {
+        let today = calendar.startOfDay(for: now)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)
+        return Dictionary(grouping: self) { calendar.startOfDay(for: $0.updatedAt) }
+            .sorted { $0.key > $1.key }
+            .map { day, runs in
+                let title = day == today ? String(localized: "Today", bundle: .resources)
+                    : day == yesterday ? String(localized: "Yesterday", bundle: .resources)
+                    : day.formatted(date: .long, time: .omitted)
+                return RunDay(day: day, title: title, runs: runs.sorted { $0.updatedAt > $1.updatedAt })
+            }
     }
 }

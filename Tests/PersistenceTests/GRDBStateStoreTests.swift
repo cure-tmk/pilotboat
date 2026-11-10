@@ -135,3 +135,22 @@ private func run(_ state: RunState = .settling, rule: String = "r1", number: Int
     try GRDBStateStore(url: url).write { try $0.insertRun(r) }
     #expect(try GRDBStateStore(url: url).read { try $0.run(id: r.id) } == r)
 }
+
+@Test func unknownRunStateThrowsInsteadOfCrashing() throws {
+    let r = run(.queued)
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appendingPathComponent("state.sqlite")
+    try GRDBStateStore(url: url).write { try $0.insertRun(r) }
+    try DatabaseQueue(path: url.path).write { try $0.execute(sql: "UPDATE runs SET state = 'paused'") }
+    let store = try GRDBStateStore(url: url)
+    #expect(throws: CorruptRowError(column: "state", value: "paused")) { try store.read { try $0.run(id: r.id) } }
+}
+
+@Test func runsCreatedIndexExists() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appendingPathComponent("state.sqlite")
+    _ = try GRDBStateStore(url: url)
+    #expect(try DatabaseQueue(path: url.path).read { try $0.indexes(on: "runs").map(\.name) }.contains("runs_created"))
+}

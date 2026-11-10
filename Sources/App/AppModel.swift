@@ -2,66 +2,72 @@ import AppKit
 import Core
 import Foundation
 import LauncherOrca
-import LauncherScript
 import Observation
 import OSLog
 import Persistence
 import ProcessKit
 import ServiceManagement
 import SourceGitHub
-import SwiftUI
 
 let appLogger = Logger(subsystem: AppPaths.bundleID, category: "app")
 
+@MainActor
+protocol AppShell: AnyObject {
+    func showMain()
+    func closePopover()
+}
+
 @MainActor @Observable
 final class AppModel {
-    nonisolated static let host = "github.com"
     private static let onboardingKey = "onboardingCompleted"
 
-    let engine: Engine
-    let scheduler: Scheduler
-    let orcaLauncher: OrcaLauncher
-    let scriptLauncher: ScriptLauncher
     let resolvedSearchPath: [String]
+    let router = MainRouter()
+    let account: GitHubAccount
+    let orca: OrcaLinker
+    @ObservationIgnored weak var shell: AppShell?
+    @ObservationIgnored private let engine: Engine
+    @ObservationIgnored private let scheduler: Scheduler
     @ObservationIgnored private let github: GitHubSource
-    @ObservationIgnored private let secretStore: any SecretStore
-    @ObservationIgnored private let runner: ProcessRunner
+    @ObservationIgnored private let runner: any CommandRunner
+    @ObservationIgnored private let launchers: [String: any Launcher]
     @ObservationIgnored private let settingsSnapshot: SettingsSnapshot
+    @ObservationIgnored private var writes: Task<Bool, Never>?
+    @ObservationIgnored private var pendingWrites = 0
 
     private(set) var config: Config
     private(set) var status: EngineStatus
     private(set) var recentRuns: [Run] = []
     private(set) var pendingRuns: [Run] = []
-    private(set) var diagnostics: [DiagnosticItem] = []
-    private(set) var githubLogin: String?
+    private(set) var health = HealthReport()
     private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
     private(set) var onboardingCompleted = UserDefaults.standard.bool(forKey: AppModel.onboardingKey)
     var lastErrorMessage: String?
-    let router = MainRouter()
-    @ObservationIgnored var showMain: (() -> Void)?
-    @ObservationIgnored var closePopover: (() -> Void)?
 
-    init(engine: Engine, scheduler: Scheduler, github: GitHubSource, secretStore: any SecretStore, runner: ProcessRunner,
-         orcaLauncher: OrcaLauncher, scriptLauncher: ScriptLauncher, settingsSnapshot: SettingsSnapshot,
-         config: Config, status: EngineStatus, searchPath: [String]) {
-        self.engine = engine; self.scheduler = scheduler; self.github = github; self.secretStore = secretStore; self.runner = runner
-        self.orcaLauncher = orcaLauncher; self.scriptLauncher = scriptLauncher; self.settingsSnapshot = settingsSnapshot
+    init(engine: Engine, scheduler: Scheduler, github: GitHubSource, secretStore: any SecretStore, runner: any CommandRunner,
+         launchers: [String: any Launcher], settingsSnapshot: SettingsSnapshot, config: Config, status: EngineStatus, searchPath: [String]) {
+        self.engine = engine; self.scheduler = scheduler; self.github = github; self.runner = runner
+        self.launchers = launchers; self.settingsSnapshot = settingsSnapshot
         self.config = config; self.status = status; self.resolvedSearchPath = searchPath
+        account = GitHubAccount(github: github, secretStore: secretStore, runner: runner, searchPath: searchPath)
+        orca = OrcaLinker(runner: runner)
+        account.model = self
+        orca.model = self
     }
 
     func start() {
         Task { for await event in engine.events { await handle(event) } }
         Task {
             await reloadRuns()
-            guard let token = try? await keychain({ try $0.token(host: Self.host) }) else { return }
-            githubLogin = try? await github.verifyToken(token)
+            await account.restore()
         }
     }
 
     private func handle(_ event: EngineEvent) async {
         switch event {
         case .configChanged(let new):
-            apply(new)
+            // While local edits are in flight the local config is ahead; the last write re-syncs it.
+            if pendingWrites == 0 { apply(new) }
         case .statusChanged(let new):
             status = new
             appLogger.info("Tick at \(new.lastTickAt?.formatted(.iso8601) ?? "-", privacy: .public) error=\(new.lastError ?? "none", privacy: .public)")
@@ -77,37 +83,75 @@ final class AppModel {
     }
 
     private func apply(_ new: Config) {
-        config = new
+        if config != new { config = new }
         settingsSnapshot.update(new.general)
     }
 
     private func reloadRuns() async {
         await perform {
-            recentRuns = try await engine.recentRuns(limit: 50)
-            pendingRuns = try await engine.pendingApprovalRuns()
+            let recent = try await engine.recentRuns(limit: 50)
+            let pending = try await engine.pendingApprovalRuns()
+            if recent != recentRuns { recentRuns = recent }
+            if pending != pendingRuns { pendingRuns = pending }
         }
     }
 
-    // MARK: Config and monitoring
+    // MARK: Config
 
-    func updateConfig(_ new: Config) async {
-        await updateConfig { $0 = new }
+    /// Applies `transform` to `config` right away and writes it to the engine in order with earlier edits.
+    /// Returns what the transform returned locally. A failed write re-syncs `config` from the engine and shows the error.
+    @discardableResult
+    func edit<T>(_ transform: @escaping @Sendable (inout Config) -> T) -> T {
+        var after = config
+        let result = transform(&after)
+        _ = enqueue(after) { _ = transform(&$0) }
+        return result
     }
 
-    func updateConfig(_ transform: @Sendable (inout Config) -> Void) async {
-        let before = Set(config.repositories.map(\.id))
-        await perform {
-            try await engine.updateConfig(transform)
-            apply(await engine.config)
+    /// Like `edit`, but waits for the write. Returns whether it succeeded.
+    @discardableResult
+    func updateConfig(_ transform: @escaping @Sendable (inout Config) -> Void) async -> Bool {
+        var after = config
+        transform(&after)
+        return await enqueue(after, transform).value
+    }
+
+    private func enqueue(_ after: Config, _ transform: @escaping @Sendable (inout Config) -> Void) -> Task<Bool, Never> {
+        let before = config
+        guard after != before else { return Task { true } }
+        config = after
+        pendingWrites += 1
+        let previous = writes
+        let write = Task {
+            _ = await previous?.value
+            return await commit(before: before, after: after, transform)
         }
-        if config.repositories.contains(where: { !before.contains($0.id) }) { await linkNewRepositories() }
+        writes = write
+        return write
     }
 
-    private func linkNewRepositories() async {
-        for launcher in config.launchers where launcher.type == OrcaLauncher.typeID {
-            await bindRepositoriesToOrca(launcherId: launcher.id, reportErrors: false)
+    private func commit(before: Config, after: Config, _ transform: @escaping @Sendable (inout Config) -> Void) async -> Bool {
+        var succeeded = true
+        do {
+            // Reusing `after` keeps ids generated by the transform identical to the ones the views already saw.
+            try await engine.updateConfig { @Sendable config in
+                if config == before { config = after } else { transform(&config) }
+            }
+        } catch {
+            succeeded = false
+            report(error)
         }
+        pendingWrites -= 1
+        // Read first: edits enqueued during the await are ahead of `latest`, and the last write re-syncs, even after a failure here.
+        let latest = await engine.config
+        if pendingWrites == 0 { apply(latest) }
+        guard succeeded else { return false }
+        if before.launchers != after.launchers { orca.refresh() }
+        if !Set(after.repositories.map(\.id)).subtracting(before.repositories.map(\.id)).isEmpty { await orca.repositoriesAdded() }
+        return true
     }
+
+    // MARK: Monitoring
 
     func setMonitoring(_ on: Bool, includeExistingReviewRequests: Bool = false) async {
         await perform { try await engine.setMonitoring(on, includeExistingReviewRequests: includeExistingReviewRequests) }
@@ -140,7 +184,7 @@ final class AppModel {
     /// Reads the review requests waiting now, without recording anything.
     // Not `engine.tick()`: a tick marks the waiting requests as processed, so "Handle them too" at the end of onboarding could no longer pick them up.
     func pollOnce() async {
-        let context = SourceContext(repositories: config.repositories.filter { $0.host == Self.host && $0.monitoring },
+        let context = SourceContext(repositories: config.repositories.filter { $0.host == Repository.defaultHost && $0.monitoring },
                                     requestedKinds: [.reviewRequested], cursor: nil)
         await perform { status.openReviewRequests = try await github.poll(context: context).openReviewRequests }
     }
@@ -153,26 +197,36 @@ final class AppModel {
     func openWorkspace(runId: UUID) async { await perform { try await engine.openWorkspace(runId: runId) } }
 
     func openPR(run: Run) {
-        guard let url = run.snapshot?.subject.pullRequest?.url ?? URL(string: "https://\(Self.host)/\(run.repo)/pull/\(run.prNumber)") else { return }
+        guard let url = run.pullRequest?.url ?? URL(string: "https://\(Repository.defaultHost)/\(run.repo)/pull/\(run.prNumber)") else { return }
         NSWorkspace.shared.open(url)
     }
 
-    func eventsForRun(id: UUID) async throws -> [Event] { try await readable { try await engine.eventsForRun(id: id) } }
+    func eventsForRun(id: UUID) async throws -> [Event] { try await described { try await engine.eventsForRun(id: id) } }
 
     func dryRun(ruleId: String, prURL: URL) async throws -> DryRunReport {
-        try await readable { try await engine.dryRun(ruleId: ruleId, prURL: prURL) }
+        try await described { try await engine.dryRun(ruleId: ruleId, prURL: prURL) }
     }
 
     func trialRun(ruleId: String, prURL: URL) async throws -> Run {
-        try await readable { try await engine.trialRun(ruleId: ruleId, prURL: prURL) }
-    }
-
-    func renderPreview(templateId: String, prURL: URL, kind: EventKind = .reviewRequested) async throws -> String {
-        try await readable { try await engine.renderPreview(templateId: templateId, prURL: prURL, kind: kind) }
+        try await described { try await engine.trialRun(ruleId: ruleId, prURL: prURL) }
     }
 
     func overview(repo: Repository, kind: EventKind) -> OverviewCell {
         RuleMatcher.overview(repo: repo, kind: kind, config: config)
+    }
+
+    // MARK: Launchers
+
+    func capabilities(of launcher: LauncherConfig) async -> LauncherCapabilities {
+        await launchers[launcher.type]?.capabilities(settings: launcher.settings) ?? []
+    }
+
+    func diagnose(_ launcher: LauncherConfig) async -> [DiagnosticItem] {
+        await launchers[launcher.type]?.diagnose(settings: launcher.settings) ?? []
+    }
+
+    func orcaSettings(launcherId: LauncherID) -> OrcaSettings? {
+        config.launcher(id: launcherId).flatMap { try? OrcaSettings(json: $0.settings) }
     }
 
     // MARK: Onboarding and login item
@@ -188,186 +242,47 @@ final class AppModel {
         await triggerTick()
     }
 
-    // MARK: Navigation
-
-    func openMain(section: MainSection? = nil, runId: UUID? = nil, automationId: String? = nil, repositoryId: UUID? = nil) {
-        closePopover?()
-        router.show(section: section, runId: runId, automationId: automationId, repositoryId: repositoryId)
-        showMain?()
-    }
-
-    func openSettings() {
-        closePopover?()
-        NSApp.activate()
-        // `showSettingsWindow:` sent directly is ignored on recent macOS; the app menu's Settings item still works.
-        guard let menu = NSApp.mainMenu?.items.first?.submenu,
-              let index = menu.items.firstIndex(where: { $0.keyEquivalent == "," && $0.keyEquivalentModifierMask == .command }) else { return }
-        menu.performActionForItem(at: index)
-    }
-
     func setLaunchAtLogin(_ on: Bool) async {
         do {
             if on { try SMAppService.mainApp.register() } else { try await SMAppService.mainApp.unregister() }
         } catch {
-            lastErrorMessage = Bundle.main.bundlePath.contains("/AppTranslocation/")
-                ? String(localized: "Move Pilotboat to the Applications folder and open it from there to launch it at login", bundle: .resources)
-                : Self.describe(error)
+            report(Bundle.main.bundlePath.contains("/AppTranslocation/")
+                ? AppError(String(localized: "Move Pilotboat to the Applications folder and open it from there to launch it at login", bundle: .resources))
+                : error)
         }
         launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 
-    // MARK: GitHub auth
-
-    @discardableResult
-    func signIn(token: String) async throws -> String {
-        let token = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        return try await readable {
-            let login = try await github.verifyToken(token)
-            try await keychain { try $0.setToken(token, host: Self.host) }
-            githubLogin = login
-            await triggerTick()
-            return login
-        }
-    }
-
-    @discardableResult
-    func signInWithGhCLI() async throws -> String {
-        let result = try await readable { try await runner.run(Command("gh", ["auth", "token", "--hostname", Self.host], timeout: 10)) }
-        guard result.succeeded, !result.stdoutText.isEmpty else {
-            throw AppError(String(localized: "Could not get a token from gh: \(TokenMasker.mask(result.errorTail))", bundle: .resources))
-        }
-        return try await signIn(token: result.stdoutText)
-    }
-
-    func signOut() async {
-        await perform { try await keychain { try $0.removeToken(host: Self.host) } }
-        githubLogin = nil
-    }
-
-    // Keychain calls can block on a user prompt; keep them off the main thread so the UI stays responsive.
-    private func keychain<T: Sendable>(_ body: @escaping @Sendable (any SecretStore) throws -> T) async throws -> T {
-        let store = secretStore
-        return try await Task.detached { try body(store) }.value
-    }
-
-    // MARK: Orca
-
-    private func orcaSettings(launcherId: LauncherID) -> OrcaSettings? {
-        guard let settings = config.launcher(id: launcherId)?.settings,
-              let data = try? JSONEncoder().encode(settings) else { return nil }
-        return try? JSONDecoder().decode(OrcaSettings.self, from: data)
-    }
-
-    func orcaRepos(launcherId: LauncherID = Bootstrap.defaultOrcaLauncherId) async throws -> [OrcaRepo] {
-        let launcher = OrcaLauncher(runner: runner, settingsOverride: orcaSettings(launcherId: launcherId))
-        return try await readable { try await launcher.listRepos() }
-    }
-
-    /// Fills missing `launcherBindings[launcherId]` from Orca repos whose canonical key is `host/fullName`. Returns how many were bound.
-    @discardableResult
-    func bindRepositoriesToOrca(launcherId: LauncherID = Bootstrap.defaultOrcaLauncherId, reportErrors: Bool = true) async -> Int {
-        let repos: [OrcaRepo]
-        do { repos = try await orcaRepos(launcherId: launcherId) } catch {
-            if reportErrors { lastErrorMessage = error.localizedDescription }
-            return 0
-        }
-        let byKey = Dictionary(repos.compactMap { r in r.canonicalKey.map { ($0.lowercased(), r.id) } }, uniquingKeysWith: { a, _ in a })
-        let bindings = Dictionary(uniqueKeysWithValues: config.repositories.compactMap { repo in
-            repo.launcherBindings[launcherId] == nil ? byKey["\(repo.host)/\(repo.fullName)".lowercased()].map { (repo.id, $0) } : nil
-        })
-        guard !bindings.isEmpty else { return 0 }
-        await updateConfig { config in
-            for i in config.repositories.indices {
-                if let id = bindings[config.repositories[i].id] { config.repositories[i].launcherBindings[launcherId] = id }
-            }
-        }
-        return bindings.count
-    }
-
-    // MARK: Diagnostics, export and import
+    // MARK: Diagnostics
 
     func refreshDiagnostics() async {
-        var items = await engine.diagnostics()
-        for tool in ["git", "orca", "claude"] {
-            guard let path = PathResolver.find(tool, in: resolvedSearchPath) else {
-                items.append(DiagnosticItem(level: .warning, title: tool, detail: String(localized: "Not found on PATH", bundle: .resources)))
-                continue
-            }
-            let result = try? await runner.run(Command(path, ["--version"], timeout: 5))
-            let version = result.flatMap { $0.succeeded ? $0.stdoutText.split(separator: "\n").first.map(String.init) : nil }
-            items.append(DiagnosticItem(level: version == nil ? .warning : .ok, title: tool,
-                                        detail: "\(path) — \(version ?? String(localized: "version unknown", bundle: .resources))"))
-        }
-        items.append(DiagnosticItem(level: .ok, title: String(localized: "PATH", bundle: .resources), detail: resolvedSearchPath.joined(separator: "\n")))
-        diagnostics = items
+        orca.refresh()
+        let items = await engine.diagnostics()
+        var tools: [ToolCheck] = []
+        for name in ["git", "orca", "claude"] { tools.append(await probe(name)) }
+        health = HealthReport.make(from: items, tools: tools, searchPath: resolvedSearchPath)
     }
 
-    func exportConfig(to url: URL) async {
-        await perform {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try encoder.encode(ConfigExport.export(config)).write(to: url, options: .atomic)
-        }
-    }
-
-    /// Applies the import right away; the result lists conflicts resolved with `policy` and launchers needing an executable.
-    func importConfig(from url: URL, policy: ImportConflictPolicy) async throws -> ImportResult {
-        let result = try await readable {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            return ConfigExport.importing(try decoder.decode(ExportedConfig.self, from: Data(contentsOf: url)), into: config, conflictPolicy: policy)
-        }
-        let imported = result.config
-        try await readable {
-            try await engine.updateConfig { @Sendable in $0 = imported }
-            apply(await engine.config)
-        }
-        await linkNewRepositories()
-        return result
-    }
-
-    func exportLogs(to url: URL) async {
-        await perform { try await Task.detached { try Self.writeLogs(to: url) }.value }
-    }
-
-    private nonisolated static func writeLogs(to url: URL) throws {
-        let store = try OSLogStore(scope: .currentProcessIdentifier)
-        let entries = try store.getEntries(at: store.position(date: Date().addingTimeInterval(-86_400)),
-                                           matching: NSPredicate(format: "subsystem == %@", AppPaths.bundleID))
-        let lines = entries.compactMap { $0 as? OSLogEntryLog }.map {
-            "\($0.date.formatted(.iso8601)) [\($0.category)] \(TokenMasker.mask($0.composedMessage))"
-        }
-        try lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+    private func probe(_ name: String) async -> ToolCheck {
+        guard let path = PathResolver.find(name, in: resolvedSearchPath) else { return ToolCheck(name: name) }
+        let result = try? await runner.run(Command(path, ["--version"], timeout: 5))
+        let version = result.flatMap { $0.succeeded ? $0.stdoutText.split(separator: "\n").first.map(String.init) : nil }
+        return ToolCheck(name: name, path: path, version: version)
     }
 
     // MARK: Errors
 
-    private func perform(_ body: () async throws -> Void) async {
-        do { try await body() } catch { lastErrorMessage = Self.describe(error) }
+    func report(_ error: any Error) {
+        let message = Self.describe(error)
+        appLogger.error("\(message, privacy: .public)")
+        lastErrorMessage = message
     }
 
-    private func readable<T>(_ body: () async throws -> T) async throws -> T {
+    func perform(_ body: () async throws -> Void) async {
+        do { try await body() } catch { report(error) }
+    }
+
+    func described<T>(_ body: () async throws -> T) async throws -> T {
         do { return try await body() } catch { throw AppError(Self.describe(error)) }
-    }
-
-    static func describe(_ error: any Error) -> String {
-        let message: String = switch error {
-        case let e as EngineError:
-            switch e {
-            case .ruleNotFound(let id): String(localized: "Rule not found: \(id)", bundle: .resources)
-            case .templateNotFound(let id): String(localized: "Prompt template not found: \(id)", bundle: .resources)
-            case .launcherNotFound(let id): String(localized: "Launcher not found: \(id)", bundle: .resources)
-            case .noSourceForHost(let host): String(localized: "Unsupported host: \(host)", bundle: .resources)
-            case .runNotFound: String(localized: "Run not found", bundle: .resources)
-            case .invalidTransition(let state): String(localized: "Not possible while the run is \(state.rawValue)", bundle: .resources)
-            case .unsupportedSubject: String(localized: "Only pull requests are supported", bundle: .resources)
-            }
-        case CommandError.executableNotFound(let name): String(localized: "\(name) was not found on PATH", bundle: .resources)
-        case CommandError.launchFailed(let reason): String(localized: "Could not start the command: \(reason)", bundle: .resources)
-        case is LocalizedError: error.localizedDescription
-        default: String(describing: error)
-        }
-        return TokenMasker.mask(message)
     }
 }

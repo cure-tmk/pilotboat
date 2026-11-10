@@ -6,6 +6,7 @@ public actor Scheduler {
     public typealias Sleep = @Sendable (Duration) async throws -> Void
 
     static let pollRange = 60...900
+    static let baseBackoff: TimeInterval = 60
     static let maxBackoff: TimeInterval = 900
 
     private let engine: Engine
@@ -43,6 +44,7 @@ public actor Scheduler {
             triggered = false
             let delay = await delay(after: engine.tick())
             if triggered { continue }
+            guard !Task.isCancelled else { break }
             let sleeper = Task { [sleep] in try await sleep(.seconds(delay)) }
             self.sleeper = sleeper
             _ = await sleeper.result
@@ -54,7 +56,7 @@ public actor Scheduler {
         let interval = TimeInterval(min(max(general.pollIntervalSeconds, Self.pollRange.lowerBound), Self.pollRange.upperBound))
         switch outcome {
         case .failed(let failures):
-            return min(60 * pow(2, Double(failures - 1)), Self.maxBackoff)
+            return min(Self.baseBackoff * pow(2, Double(failures - 1)), Self.maxBackoff)
         case .monitoringOff(let until?):
             return max(0, min(interval, until.timeIntervalSince(time.now)))
         case .completed, .monitoringOff(nil), .busy:

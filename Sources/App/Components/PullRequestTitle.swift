@@ -6,11 +6,6 @@ struct PullRequestTitle: View {
     let name: String
     let title: String?
 
-    init(ref: PullRequestRef) {
-        name = "\(ref.repo.split(separator: "/").last.map(String.init) ?? ref.repo) #\(ref.number)"
-        title = ref.title
-    }
-
     init(run: Run) {
         name = run.shortTitle
         title = run.pullRequest?.title

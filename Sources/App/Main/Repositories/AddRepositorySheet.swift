@@ -9,23 +9,18 @@ struct AddRepositorySheet: View {
     @State private var orcaRepos: [OrcaRepo] = []
     @State private var picked: Set<String> = []
 
-    private var orcaId: LauncherID { model.config.launchers.first { $0.type == "orca" }?.id ?? "orca" }
-
-    private func fullName(_ repo: OrcaRepo) -> String? {
-        guard let key = repo.canonicalKey else { return nil }
-        let prefix = AppModel.host + "/"
-        return key.lowercased().hasPrefix(prefix) ? String(key.dropFirst(prefix.count)) : nil
-    }
+    private var orcaId: LauncherID? { model.config.launchers(ofType: OrcaLauncher.typeID).first?.id }
 
     private var candidates: [(repo: OrcaRepo, name: String)] {
         orcaRepos.compactMap { repo in
-            guard let name = fullName(repo), model.config.repository(host: AppModel.host, fullName: name) == nil else { return nil }
+            guard let name = repo.fullName(host: Repository.defaultHost),
+                  model.config.repository(host: Repository.defaultHost, fullName: name) == nil else { return nil }
             return (repo, name)
         }
     }
 
     private var typed: String { name.trimmingCharacters(in: .whitespaces) }
-    private var typedValid: Bool { typed.wholeMatch(of: /[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/) != nil }
+    private var typedValid: Bool { Repository.isValidFullName(typed) }
     private var typedTaken: Bool { model.config.repositories.contains { $0.fullName.caseInsensitiveCompare(typed) == .orderedSame } }
 
     var body: some View {
@@ -57,20 +52,21 @@ struct AddRepositorySheet: View {
         }
         .formStyle(.grouped)
         .frame(width: 440, height: 380)
-        .task { orcaRepos = (try? await model.orcaRepos(launcherId: orcaId)) ?? [] }
+        .task {
+            guard let orcaId else { return }
+            orcaRepos = (try? await model.orca.repos(launcherId: orcaId)) ?? []
+        }
     }
 
     private func add() {
         var new: [Repository] = candidates.filter { picked.contains($0.repo.id) }
-            .map { Repository(fullName: $0.name, launcherBindings: [orcaId: $0.repo.id]) }
+            .map { candidate in Repository(fullName: candidate.name, launcherBindings: orcaId.map { [$0: candidate.repo.id] } ?? [:]) }
         if typedValid, !typedTaken, !new.contains(where: { $0.fullName.caseInsensitiveCompare(typed) == .orderedSame }) {
             new.append(Repository(fullName: typed))
         }
         let added = new
-        Task {
-            await model.updateConfig { $0.repositories.append(contentsOf: added) }
-            if let first = added.first { model.router.repositoryId = first.id }
-        }
+        model.edit { $0.repositories.append(contentsOf: added) }
+        if let first = added.first { model.router.repositoryId = first.id }
         dismiss()
     }
 }

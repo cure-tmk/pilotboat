@@ -12,12 +12,7 @@ struct AutomationsPage: View {
     private var config: Config { model.config }
     private var isDirty: Bool { draft != original }
 
-    /// Same order the matcher uses: priority descending, then config order.
-    private var rules: [Rule] {
-        config.rules.enumerated()
-            .sorted { ($0.element.priority, -$0.offset) > ($1.element.priority, -$1.offset) }
-            .map(\.element)
-    }
+    private var rules: [Rule] { config.rankedRules }
 
     private var selectedRule: Rule? { model.router.automationId.flatMap(config.rule(id:)) }
 
@@ -142,26 +137,11 @@ struct AutomationsPage: View {
     }
 
     private func save() {
-        guard let draft, let original else { return }
-        let bodyEdited = draft.template.body != original.template.body
+        guard let draft else { return }
+        let (rule, body) = (draft.rule, draft.template.body)
         Task {
-            let before = model.config
-            await model.updateConfig { config in
-                guard let i = config.rules.firstIndex(where: { $0.id == draft.rule.id }) else { return }
-                var rule = draft.rule
-                rule.priority = config.rules[i].priority
-                config.rules[i] = rule
-                if let t = config.promptTemplates.firstIndex(where: { $0.id == draft.template.id }) {
-                    config.promptTemplates[t] = draft.template
-                } else {
-                    config.promptTemplates.append(draft.template)
-                }
-                if bodyEdited, config.presetState[draft.template.id] != nil {
-                    config.presetState[draft.template.id]?.editedByUser = true
-                }
-            }
             // A failed save leaves the config unchanged; keep the draft so nothing is lost.
-            if model.config != before { load() }
+            if await model.updateConfig({ $0.saveRule(rule, templateBody: body) }) { load() }
         }
     }
 
@@ -169,63 +149,33 @@ struct AutomationsPage: View {
 
     private func setEnabled(_ id: String, _ on: Bool) {
         if draft?.rule.id == id { draft?.rule.enabled = on; original?.rule.enabled = on }
-        Task {
-            await model.updateConfig { config in
-                if let i = config.rules.firstIndex(where: { $0.id == id }) { config.rules[i].enabled = on }
-            }
+        model.edit { config in
+            if let i = config.rules.firstIndex(where: { $0.id == id }) { config.rules[i].enabled = on }
         }
     }
 
     private func move(from source: IndexSet, to destination: Int) {
         var ordered = rules.map(\.id)
         ordered.move(fromOffsets: source, toOffset: destination)
-        let priorities = Dictionary(ordered.enumerated().map { ($1, ordered.count - 1 - $0) }, uniquingKeysWith: { a, _ in a })
-        Task {
-            await model.updateConfig { config in
-                for i in config.rules.indices {
-                    if let p = priorities[config.rules[i].id] { config.rules[i].priority = p }
-                }
-            }
-        }
+        let order = ordered
+        model.edit { $0.setRuleOrder(order) }
     }
 
     private func create(_ kind: EventKind) {
-        let requested = kind == .reviewRequested
-        let presetId = requested ? Presets.reviewRequestedId : Presets.reviewReceivedId
-        let template = PromptTemplate(name: kind.shortName, body: config.promptTemplate(id: presetId)?.body ?? "")
-        let rule = Rule(name: kind.shortName, enabled: false,
-                        priority: (config.rules.map(\.priority).max() ?? -1) + 1, eventKind: kind,
-                        conditions: kind.defaultConditions,
-                        settleSeconds: kind.defaultSettleSeconds,
-                        launcherId: config.launchers.first?.id ?? Bootstrap.defaultOrcaLauncherId,
-                        workspacePolicy: requested ? .reusePrevious : .reuseOrCreate,
-                        promptTemplateId: template.id)
-        Task {
-            await model.updateConfig { config in
-                config.promptTemplates.append(template)
-                config.rules.append(rule)
-            }
-            if config.rule(id: rule.id) != nil { select(rule.id) }
-        }
+        let presetId = kind == .reviewRequested ? Presets.reviewRequestedId : Presets.reviewReceivedId
+        let body = config.promptTemplate(id: presetId)?.body ?? ""
+        let launcherId = config.launchers.first?.id ?? Bootstrap.defaultOrcaLauncherId
+        let name = kind.shortName
+        let (id, templateId) = (UUID().uuidString, UUID().uuidString)
+        model.edit { $0.addRule(id: id, templateId: templateId, name: name, kind: kind, launcherId: launcherId, templateBody: body) }
+        select(id)
     }
 
     private func duplicate() {
         guard let rule = selectedRule else { return }
-        var copy = rule
-        copy.id = UUID().uuidString
-        copy.name = String(localized: "\(rule.name) copy", bundle: .resources)
-        copy.enabled = false
-        let template = PromptTemplate(name: copy.name, body: config.promptTemplate(id: rule.promptTemplateId)?.body ?? "")
-        copy.promptTemplateId = template.id
-        let duplicate = copy
-        Task {
-            await model.updateConfig { config in
-                config.promptTemplates.append(template)
-                let index = config.rules.firstIndex { $0.id == rule.id }.map { $0 + 1 } ?? config.rules.endIndex
-                config.rules.insert(duplicate, at: index)
-            }
-            if config.rule(id: duplicate.id) != nil { select(duplicate.id) }
-        }
+        let (id, name) = (rule.id, String(localized: "\(rule.name) copy", bundle: .resources))
+        let (newId, newTemplateId) = (UUID().uuidString, UUID().uuidString)
+        if model.edit({ $0.duplicateRule(id: id, newId: newId, newTemplateId: newTemplateId, name: name) }) != nil { select(newId) }
     }
 
     private func delete(_ rule: Rule) {
@@ -233,13 +183,7 @@ struct AutomationsPage: View {
             draft = nil; original = nil
             model.router.automationId = nil
         }
-        Task {
-            await model.updateConfig { config in
-                config.rules.removeAll { $0.id == rule.id }
-                if !config.rules.contains(where: { $0.promptTemplateId == rule.promptTemplateId }) {
-                    config.promptTemplates.removeAll { $0.id == rule.promptTemplateId }
-                }
-            }
-        }
+        let id = rule.id
+        model.edit { $0.removeRule(id: id) }
     }
 }

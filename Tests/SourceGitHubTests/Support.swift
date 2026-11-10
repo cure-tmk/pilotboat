@@ -6,6 +6,7 @@ struct StubResponse {
     var status = 200
     var headers: [String: String] = [:]
     var body: Any = [String: Any]()
+    var failure: URLError?
 }
 
 final class Stub: @unchecked Sendable {
@@ -15,12 +16,16 @@ final class Stub: @unchecked Sendable {
     let token = "ghp_test\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
     private let handler: @Sendable ([String: Any]) -> StubResponse
     private(set) var requests: [[String: Any]] = []
+    private(set) var timeouts: [TimeInterval] = []
+    private(set) var endpoints: [URL] = []
 
     init(_ handler: @escaping @Sendable ([String: Any]) -> StubResponse) {
         self.handler = handler
         Self.lock.withLock { Self.stubs[token] = self }
     }
 
+    var requestTimeouts: [TimeInterval] { Self.lock.withLock { timeouts } }
+    var urls: [URL] { Self.lock.withLock { endpoints } }
     var queries: [String] { Self.lock.withLock { requests.map { $0["query"] as! String } } }
     var variables: [[String: Any]] { Self.lock.withLock { requests.map { $0["variables"] as! [String: Any] } } }
 
@@ -28,7 +33,7 @@ final class Stub: @unchecked Sendable {
         let token = request.value(forHTTPHeaderField: "Authorization")!.replacingOccurrences(of: "bearer ", with: "")
         let stub = lock.withLock { stubs[token]! }
         let body = try! JSONSerialization.jsonObject(with: readBody(request)) as! [String: Any]
-        lock.withLock { stub.requests.append(body) }
+        lock.withLock { stub.requests.append(body); stub.timeouts.append(request.timeoutInterval); stub.endpoints.append(request.url!) }
         return stub.handler(body)
     }
 
@@ -53,6 +58,7 @@ final class StubProtocol: URLProtocol {
     override func stopLoading() {}
     override func startLoading() {
         let r = Stub.handle(request)
+        if let failure = r.failure { client?.urlProtocol(self, didFailWithError: failure); return }
         let response = HTTPURLResponse(url: request.url!, statusCode: r.status, httpVersion: nil, headerFields: r.headers)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: try! JSONSerialization.data(withJSONObject: r.body))
@@ -65,10 +71,10 @@ struct FixedTime: TimeSource { var now: Date }
 let t0 = Date(timeIntervalSince1970: 1_800_000_000)
 func iso(_ d: Date) -> String { d.formatted(.iso8601) }
 
-func makeSource(_ stub: Stub, includeTeams: Bool = false, excluded: [String] = [], tokens: Bool = true, now: Date = t0) -> GitHubSource {
+func makeSource(_ stub: Stub, host: String = "github.com", includeTeams: Bool = false, excluded: [String] = [], tokens: Bool = true, now: Date = t0) -> GitHubSource {
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [StubProtocol.self]
-    return GitHubSource(secretStore: InMemorySecretStore(tokens: tokens ? ["github.com": stub.token] : [:]),
+    return GitHubSource(host: host, secretStore: InMemorySecretStore(tokens: tokens ? [host: stub.token] : [:]),
                         session: URLSession(configuration: config), time: FixedTime(now: now),
                         includeTeamReviewRequests: { includeTeams }, excludedActors: { excluded })
 }

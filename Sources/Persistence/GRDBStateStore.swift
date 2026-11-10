@@ -2,6 +2,12 @@ import Core
 import Foundation
 import GRDB
 
+/// A stored value this version cannot read, e.g. a run state written by a newer app.
+public struct CorruptRowError: Error, Hashable, Sendable {
+    public var column: String
+    public var value: String
+}
+
 public final class GRDBStateStore: StateStore, @unchecked Sendable {
     private let queue: DatabaseQueue
 
@@ -52,6 +58,9 @@ public final class GRDBStateStore: StateStore, @unchecked Sendable {
                 repo_id TEXT NOT NULL, kind TEXT NOT NULL, at REAL NOT NULL, PRIMARY KEY (repo_id, kind));
             CREATE TABLE source_cursors (source_type TEXT PRIMARY KEY, cursor REAL NOT NULL);
             """)
+        }
+        m.registerMigration("v2") { db in
+            try db.execute(sql: "CREATE INDEX runs_created ON runs(created_at)")
         }
         return m
     }
@@ -169,11 +178,14 @@ private struct Access: StateAccess {
     private func fetchRuns(_ tail: String, _ arguments: StatementArguments) throws -> [Run] {
         try Row.fetchAll(db, sql: "SELECT * FROM runs \(tail)", arguments: arguments).map { row in
             let snapshotJSON: String? = row["snapshot_json"]
-            let state: String = row["state"]
+            let idText: String = row["id"]
+            let stateText: String = row["state"]
             let skip: String? = row["skip_reason"]
+            guard let id = UUID(uuidString: idText) else { throw CorruptRowError(column: "id", value: idText) }
+            guard let state = RunState(rawValue: stateText) else { throw CorruptRowError(column: "state", value: stateText) }
             return Run(
-                id: UUID(uuidString: row["id"])!,
-                state: RunState(rawValue: state)!,
+                id: id,
+                state: state,
                 skipReason: skip.flatMap(SkipReason.init(rawValue:)),
                 ruleId: row["rule_id"], repo: row["repo"], prNumber: row["pr_number"],
                 settleUntil: date(row["settle_until"]),

@@ -5,11 +5,18 @@ final class FailingStateStore: StateStore, @unchecked Sendable {
     let base = InMemoryStateStore()
     private let lock = NSLock()
     private var _failWrites = false
+    private var _writesBeforeFailure: Int?
     var failWrites: Bool { get { lock.withLock { _failWrites } } set { lock.withLock { _failWrites = newValue } } }
+    /// Lets this many more writes succeed, then fails every write.
+    var writesBeforeFailure: Int? { get { lock.withLock { _writesBeforeFailure } } set { lock.withLock { _writesBeforeFailure = newValue } } }
 
     func read<T>(_ body: (any StateAccess) throws -> T) throws -> T { try base.read(body) }
     func write<T>(_ body: (any StateAccess) throws -> T) throws -> T {
-        if failWrites { throw FakeError(description: "disk full") }
+        let fail = lock.withLock {
+            if let n = _writesBeforeFailure { _writesBeforeFailure = max(0, n - 1); if n == 0 { return true } }
+            return _failWrites
+        }
+        if fail { throw FakeError(description: "disk full") }
         return try base.write(body)
     }
 }
@@ -23,6 +30,7 @@ final class FakeClock: TimeSource, @unchecked Sendable {
 }
 
 struct FakeError: Error, CustomStringConvertible { var description: String }
+enum FakeLocalizedError: LocalizedError { case broken; var errorDescription: String? { "Readable message" } }
 struct FakeRetryableError: RetryableLaunchError, CustomStringConvertible { var description: String; var retryToken: String }
 
 final class FakeSource: EventSource, @unchecked Sendable {
@@ -35,6 +43,7 @@ final class FakeSource: EventSource, @unchecked Sendable {
     private var _prStates: [Int: PullRequestState] = [:]
     private var _prError: Error?
     private var _contexts: [SourceContext] = []
+    private var _pullRequestCount = 0
 
     var events: [Event] { get { lock.withLock { _events } } set { lock.withLock { _events = newValue } } }
     var openReviewRequests: [PullRequestRef] { get { lock.withLock { _open } } set { lock.withLock { _open = newValue } } }
@@ -42,6 +51,7 @@ final class FakeSource: EventSource, @unchecked Sendable {
     var pullRequestStates: [Int: PullRequestState] { get { lock.withLock { _prStates } } set { lock.withLock { _prStates = newValue } } }
     var pullRequestError: Error? { get { lock.withLock { _prError } } set { lock.withLock { _prError = newValue } } }
     var pollCount: Int { lock.withLock { _contexts.count } }
+    var pullRequestCount: Int { lock.withLock { _pullRequestCount } }
 
     func poll(context: SourceContext) async throws -> PollResult {
         try lock.withLock {
@@ -54,7 +64,7 @@ final class FakeSource: EventSource, @unchecked Sendable {
     func pullRequest(url: URL) async throws -> PullRequestRef {
         let parts = url.pathComponents
         let number = Int(parts[4])!
-        let (state, error) = lock.withLock { (_prStates[number] ?? .open, _prError) }
+        let (state, error) = lock.withLock { _pullRequestCount += 1; return (_prStates[number] ?? .open, _prError) }
         if let error { throw error }
         var pr = makePR(repo: "\(parts[1])/\(parts[2])", number: number)
         pr.state = state
@@ -66,7 +76,7 @@ final class FakeSource: EventSource, @unchecked Sendable {
 
 final class FakeLauncher: Launcher, @unchecked Sendable {
     static let typeID = "fake"
-    let capabilities: LauncherCapabilities
+    private let _capabilities: LauncherCapabilities
     private let lock = NSLock()
     private var _requests: [LaunchRequest] = []
     private var _failures: [any Error] = []
@@ -74,13 +84,16 @@ final class FakeLauncher: Launcher, @unchecked Sendable {
     private var _hold = false
     private var _waiters: [CheckedContinuation<Void, Never>] = []
 
-    init(capabilities: LauncherCapabilities = [.reuseWorkspace]) { self.capabilities = capabilities }
+    init(capabilities: LauncherCapabilities = [.reuseWorkspace]) { _capabilities = capabilities }
+
+    func capabilities(settings: JSONValue) async -> LauncherCapabilities { _capabilities }
 
     var requests: [LaunchRequest] { lock.withLock { _requests } }
     var opened: [(String, JSONValue)] { lock.withLock { _opened } }
     func failNext(_ message: String, retryToken: String? = nil) {
         lock.withLock { _failures.append(retryToken.map { FakeRetryableError(description: message, retryToken: $0) } ?? FakeError(description: message)) }
     }
+    func failNext(with error: any Error) { lock.withLock { _failures.append(error) } }
     func hold() { lock.withLock { _hold = true } }
     func release() {
         let waiters = lock.withLock { _hold = false; defer { _waiters = [] }; return _waiters }
@@ -140,7 +153,7 @@ struct Harness {
     let clock = FakeClock(startDate)
     let source = FakeSource()
     let launcher: FakeLauncher
-    let store = InMemoryStateStore()
+    let store = FailingStateStore()
     let configStore: InMemoryConfigStore
     let engine: Engine
 

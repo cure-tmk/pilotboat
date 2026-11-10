@@ -16,7 +16,7 @@ final class AppState {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, AppShell {
     let state = AppState()
     private var statusItem: StatusItemController?
     private var mainWindow: WindowController?
@@ -57,8 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let mainWindow = WindowController.main(model: model)
         self.mainWindow = mainWindow
         setupWindow = WindowController.setup(model: model)
-        model.showMain = { mainWindow.show() }
-        model.closePopover = { [weak statusItem] in statusItem?.closePopover() }
+        model.shell = self
         #if DEBUG
         if ProcessInfo.processInfo.environment["PILOTBOAT_OPEN_MAIN"] == "1" { mainWindow.show() }
         #endif
@@ -66,6 +65,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupWindow?.show()
         awaitOnboarding(model)
     }
+
+    func showMain() { mainWindow?.show() }
+    func closePopover() { statusItem?.closePopover() }
 
     private func awaitOnboarding(_ model: AppModel) {
         let done = withObservationTracking { model.onboardingCompleted } onChange: { [weak self] in

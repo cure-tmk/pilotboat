@@ -138,13 +138,69 @@ import Testing
         #expect(GraphQLClient.ssoOrgs("partial-results; organizations=21955855,20582480") == ["21955855", "20582480"])
     }
 
-    @Test func lowRateLimitThrowsAndBlocksNextTick() async throws {
-        let stub = Stub { _ in searchPage([], remaining: 499) }
+    @Test func lowRateLimitReturnsEventsThenBlocksNextTick() async throws {
+        let r1 = r1
+        let stub = Stub { _ in searchPage([pr(1, timeline: [requested(r1, user: "me")])], remaining: 499) }
         let source = makeSource(stub)
+        let result = try await source.poll(context: context([.reviewRequested]))
+        #expect(result.events.count == 1)
+        #expect(result.rateLimitRemaining == 499)
         await #expect { try await source.poll(context: context()) } throws: { if case GitHubError.rateLimited(t0.addingTimeInterval(3600)) = $0 { true } else { false } }
-        await #expect(throws: GitHubError.self) { try await source.poll(context: context()) }
         #expect(stub.queries.count == 1)
         #expect(await source.lastRateLimit?.remaining == 499)
+    }
+
+    @Test func rateLimitCrossedMidPaginationKeepsEarlierPages() async throws {
+        let r1 = r1
+        let stub = Stub { body in
+            let after = (body["variables"] as! [String: Any])["after"] as? String
+            return after == nil
+                ? searchPage([pr(1, timeline: [requested(r1, user: "me")])], next: "c1")
+                : searchPage([pr(2, timeline: [requested(r1, user: "me")])], remaining: 100)
+        }
+        let result = try await makeSource(stub).poll(context: context([.reviewRequested]))
+        #expect(result.events.map(\.subject.pullRequest?.number) == [1, 2])
+    }
+
+    @Test func rateLimitHeaders() async throws {
+        let reset = t0.addingTimeInterval(900)
+        let stub = Stub { _ in StubResponse(status: 403, headers: ["X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "\(Int(reset.timeIntervalSince1970))"], body: ["message": "rate limit"]) }
+        await #expect { try await makeSource(stub).poll(context: context()) } throws: { if case GitHubError.rateLimited(reset) = $0 { true } else { false } }
+        let other = Stub { _ in StubResponse(status: 403, headers: ["X-RateLimit-Remaining": "5", "X-RateLimit-Reset": "1"], body: ["message": "forbidden"]) }
+        await #expect { try await makeSource(other).poll(context: context()) } throws: { if case GitHubError.http(403, _) = $0 { true } else { false } }
+    }
+
+    @Test func requestTimeout() async throws {
+        let stub = Stub { _ in searchPage([]) }
+        _ = try await makeSource(stub).poll(context: context())
+        #expect(stub.requestTimeouts == [30, 30])
+    }
+
+    @Test func partialGraphQLErrorsStillYieldEvents() async throws {
+        let r1 = r1
+        let stub = Stub { _ in
+            var response = searchPage([pr(1, timeline: [requested(r1, user: "me")])])
+            var body = response.body as! [String: Any]
+            body["errors"] = [["message": "Could not resolve to a node"]]
+            response.body = body
+            return response
+        }
+        let result = try await makeSource(stub).poll(context: context([.reviewRequested]))
+        #expect(result.events.count == 1)
+    }
+
+    @Test func networkErrorIsWrapped() async throws {
+        let stub = Stub { _ in StubResponse(failure: URLError(.notConnectedToInternet)) }
+        await #expect { try await makeSource(stub).poll(context: context()) } throws: { if case GitHubError.network = $0 { true } else { false } }
+    }
+
+    @Test func gheEndpoint() async throws {
+        let stub = Stub { _ in searchPage([]) }
+        _ = try await makeSource(stub, host: "ghe.example.com").poll(context: context([.reviewRequested]))
+        #expect(stub.urls.map(\.absoluteString) == ["https://ghe.example.com/api/graphql"])
+        let dotcom = Stub { _ in searchPage([]) }
+        _ = try await makeSource(dotcom).poll(context: context([.reviewRequested]))
+        #expect(dotcom.urls.map(\.absoluteString) == ["https://api.github.com/graphql"])
     }
 
     @Test(arguments: [403, 429]) func retryAfter(status: Int) async throws {

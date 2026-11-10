@@ -1,3 +1,5 @@
+import Foundation
+
 public enum JSONValue: Codable, Hashable, Sendable {
     case string(String)
     case number(Double)
@@ -28,8 +30,18 @@ public enum JSONValue: Codable, Hashable, Sendable {
         }
     }
 
-    public subscript(key: String) -> JSONValue? {
-        if case .object(let o) = self { return o[key] }
-        return nil
+    public subscript(key: String) -> JSONValue? { object?[key] }
+
+    public var string: String? { if case .string(let v) = self { v } else { nil } }
+    public var bool: Bool? { if case .bool(let v) = self { v } else { nil } }
+    public var array: [JSONValue]? { if case .array(let v) = self { v } else { nil } }
+    public var object: [String: JSONValue]? { if case .object(let v) = self { v } else { nil } }
+
+    public func decode<T: Decodable>(_ type: T.Type) throws -> T {
+        try JSONDecoder().decode(T.self, from: JSONEncoder().encode(self))
+    }
+
+    public init<T: Encodable>(encoding value: T) throws {
+        self = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(value))
     }
 }

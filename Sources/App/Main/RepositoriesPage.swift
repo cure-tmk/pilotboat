@@ -1,4 +1,5 @@
 import Core
+import LauncherOrca
 import SwiftUI
 
 struct RepositoriesPage: View {
@@ -51,23 +52,16 @@ struct RepositoriesPage: View {
     }
 
     private func linked(_ repo: Repository) -> Bool {
-        model.config.launchers.contains { $0.type == "orca" && repo.launcherBindings[$0.id] != nil }
+        model.config.launchers(ofType: OrcaLauncher.typeID).contains { repo.launcherBindings[$0.id] != nil }
     }
 
     private func update(_ id: UUID, _ change: @escaping @Sendable (inout Repository) -> Void) {
-        Task { await model.updateConfig { config in if let i = config.repositories.firstIndex(where: { $0.id == id }) { change(&config.repositories[i]) } } }
+        model.edit { config in if let i = config.repositories.firstIndex(where: { $0.id == id }) { change(&config.repositories[i]) } }
     }
 
     private func remove() {
         guard let id = selected?.id else { return }
         model.router.repositoryId = nil
-        Task {
-            await model.updateConfig { config in
-                config.repositories.removeAll { $0.id == id }
-                for i in config.rules.indices {
-                    if case .only(let ids) = config.rules[i].repoScope { config.rules[i].repoScope = .only(ids.filter { $0 != id }) }
-                }
-            }
-        }
+        model.edit { $0.removeRepository(id: id) }
     }
 }
