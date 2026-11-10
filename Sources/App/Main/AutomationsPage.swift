@@ -66,7 +66,7 @@ struct AutomationsPage: View {
     }
 
     private var list: some View {
-        List(selection: Binding(get: { model.router.automationId }, set: select)) {
+        List(selection: Binding(get: { model.router.automationId }, set: { select($0) })) {
             Section {
                 ForEach(rules) { rule in row(rule).tag(rule.id) }
                     .onMove(perform: move)
