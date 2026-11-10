@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Builds Pilotboat.app from `swift build` output (no Xcode project needed).
 # Usage: Scripts/bundle.sh [debug|release]   → .build/Pilotboat.app
+# Set PILOTBOAT_UNIVERSAL=1 for an arm64 + x86_64 binary.
 # Set PILOTBOAT_SIGN_IDENTITY to a stable code-signing identity to avoid Keychain prompts on every rebuild.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 CONFIG="${1:-debug}"
 VERSION="${PILOTBOAT_VERSION:-0.1.0}"
-BUILD_DIR=$(swift build -c "$CONFIG" --show-bin-path)
-swift build -c "$CONFIG" --product Pilotboat
+ARCH_FLAGS=()
+[ "${PILOTBOAT_UNIVERSAL:-0}" = 1 ] && ARCH_FLAGS=(--arch arm64 --arch x86_64)
+BUILD_DIR=$(swift build -c "$CONFIG" ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} --show-bin-path)
+swift build -c "$CONFIG" ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} --product Pilotboat
 APP=".build/Pilotboat.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
