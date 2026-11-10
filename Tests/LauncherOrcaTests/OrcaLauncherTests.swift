@@ -53,9 +53,9 @@ func terminals(agent: String? = "claude", handle: String = "term_live") -> Comma
     return ok(#"{"terminals":[{"handle":"\#(handle)","connected":true,"writable":true,"orphaned":false\#(identity)}]}"#)
 }
 
-func request(_ policy: WorkspacePolicy, binding: String? = repoId, settings: [String: JSONValue] = [:], previousHandle: String? = nil, retryToken: String? = nil) -> LaunchRequest {
+func request(_ policy: WorkspacePolicy, binding: String? = repoId, settings: [String: JSONValue] = [:], previousRef: String? = nil, previousHandle: String? = nil, retryToken: String? = nil) -> LaunchRequest {
     let pr = PullRequestRef(host: "github.com", repo: "o/r", number: 7, url: URL(string: "https://github.com/o/r/pull/7")!, title: "t", headRef: "feature/x", headSHA: headSHA, baseRef: "main", isDraft: false, isCrossRepository: false, labels: [], author: "a")
-    return LaunchRequest(runId: UUID(), subject: .pullRequest(pr), repository: RepositoryInfo(host: "github.com", fullName: "o/r", launcherBinding: binding), workspacePolicy: policy, prompt: prompt, previousTerminalHandle: previousHandle, launcherSettings: .object(["agent": .string("claude")].merging(settings) { $1 }), retryToken: retryToken)
+    return LaunchRequest(runId: UUID(), subject: .pullRequest(pr), repository: RepositoryInfo(host: "github.com", fullName: "o/r", launcherBinding: binding), workspacePolicy: policy, prompt: prompt, previousWorkspaceRef: previousRef, previousTerminalHandle: previousHandle, launcherSettings: .object(["agent": .string("claude")].merging(settings) { $1 }), retryToken: retryToken)
 }
 
 let createReview = ["orca", "worktree", "create", "--repo", "id:repo-1", "--name", "pr-7-review", "--base-branch", headSHA, "--pr", "7", "--no-parent", "--agent", "claude", "--surface", "terminal", "--prompt", prompt, "--setup", "skip"]
@@ -177,6 +177,62 @@ func createPathRules(created: CommandResult, tail: [([String], CommandResult)]) 
 @Test func createPathBranchMismatchFails() async throws {
     let runner = ScriptedRunner(createPathRules(created: worktreeList(branch: "refs/heads/me/pr-7"), tail: []))
     await #expect(throws: OrcaLauncherError.branchMismatch(expected: "refs/heads/feature/x", actual: "refs/heads/me/pr-7")) { try await OrcaLauncher(runner: runner).launch(request(.reuseOrCreate)) }
+}
+
+let fetchPrevious = ["git", "-C", "/wt/pr-7", "fetch", "origin", "feature/x"]
+let mergePrevious = ["git", "-C", "/wt/pr-7", "merge", "--ff-only", headSHA]
+let alwaysNewRules: [([String], CommandResult)] = [(["orca", "repo"], repoList), (["git", "-C", "/src/r"], gitStatus(0)), (["orca", "worktree", "create"], ok(#"{"launch":\#(launchJSON())}"#))]
+let alwaysNewCalls = [["orca", "repo", "list", "--json"], ["git", "-C", "/src/r", "fetch", "origin", "feature/x"], createReview + ["--json"]]
+
+@Test func reusePreviousUpdatesAndSendsToRunningAgent() async throws {
+    let sleeper = SleepRecorder()
+    let runner = ScriptedRunner([
+        (["orca", "worktree", "list"], worktreeList(head: "aaaa")),
+        (fetchPrevious, gitStatus(0)), (mergePrevious, gitStatus(0)),
+        (["orca", "terminal", "list"], terminals()), (["orca", "terminal", "list"], terminals()),
+        (["orca", "terminal", "send"], ok(#"{"send":{"accepted":true,"prompt":{"requestId":"req_1","stages":["input_accepted"]}}}"#)),
+    ])
+    let result = try await OrcaLauncher(runner: runner, sleep: sleeper.sleep).launch(request(.reusePrevious, previousRef: wtId, previousHandle: "term_live"))
+    #expect(runner.calls == [
+        ["orca", "worktree", "list", "--json"], fetchPrevious, mergePrevious, termList, termList,
+        ["orca", "terminal", "send", "--terminal", "term_live", "--text", prompt, "--enter", "--wait-submit", "10", "--json"],
+    ])
+    #expect(sleeper.durations == [.seconds(3)])
+    #expect(result.workspaceRef == wtId && result.reusedWorkspace && result.sentToExistingSession && result.terminalHandle == "term_live")
+}
+
+@Test func reusePreviousWithoutAgentLaunches() async throws {
+    let runner = ScriptedRunner([
+        (["orca", "worktree", "list"], worktreeList()), (fetchPrevious, gitStatus(0)), (mergePrevious, gitStatus(0)),
+        (["orca", "terminal", "list"], ok(#"{"terminals":[]}"#)), (["orca", "agent", "launch"], ok(launchJSON())),
+    ])
+    let result = try await OrcaLauncher(runner: runner, sleep: { _ in }).launch(request(.reusePrevious, previousRef: wtId))
+    #expect(runner.calls == [["orca", "worktree", "list", "--json"], fetchPrevious, mergePrevious, termList, agentLaunch])
+    #expect(result.workspaceRef == wtId && result.reusedWorkspace && !result.sentToExistingSession && result.terminalHandle == "term_new")
+}
+
+@Test func reusePreviousFallsBackToNewWorktree() async throws {
+    let missing = ScriptedRunner([(["orca", "worktree", "list"], worktreeList())] + alwaysNewRules)
+    let fresh = try await OrcaLauncher(runner: missing).launch(request(.reusePrevious, previousRef: "repo-1::/wt/gone"))
+    #expect(missing.calls == [["orca", "worktree", "list", "--json"]] + alwaysNewCalls)
+    #expect(!fresh.reusedWorkspace)
+
+    let main = ScriptedRunner([(["orca", "worktree", "list"], worktreeList(isMain: true))] + alwaysNewRules)
+    _ = try await OrcaLauncher(runner: main).launch(request(.reusePrevious, previousRef: wtId))
+    #expect(main.calls == [["orca", "worktree", "list", "--json"]] + alwaysNewCalls)
+
+    let noPrevious = ScriptedRunner(alwaysNewRules)
+    _ = try await OrcaLauncher(runner: noPrevious).launch(request(.reusePrevious))
+    #expect(noPrevious.calls == alwaysNewCalls)
+}
+
+@Test func reusePreviousMergeFailureFallsBackToNewWorktree() async throws {
+    let runner = ScriptedRunner([
+        (["orca", "worktree", "list"], worktreeList()), (fetchPrevious, gitStatus(0)), (mergePrevious, gitStatus(128, "Not possible to fast-forward")),
+    ] + alwaysNewRules)
+    let result = try await OrcaLauncher(runner: runner).launch(request(.reusePrevious, previousRef: wtId))
+    #expect(runner.calls == [["orca", "worktree", "list", "--json"], fetchPrevious, mergePrevious] + alwaysNewCalls)
+    #expect(!result.reusedWorkspace && result.terminalHandle == "term_new")
 }
 
 @Test func retryTokenIsSurfacedAndReplayed() async throws {

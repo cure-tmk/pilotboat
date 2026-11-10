@@ -198,7 +198,7 @@ struct AutomationsPage: View {
                         conditions: kind.defaultConditions,
                         settleSeconds: kind.defaultSettleSeconds,
                         launcherId: config.launchers.first?.id ?? Bootstrap.defaultOrcaLauncherId,
-                        workspacePolicy: requested ? .alwaysNew : .reuseOrCreate,
+                        workspacePolicy: requested ? .reusePrevious : .reuseOrCreate,
                         promptTemplateId: template.id)
         Task {
             await model.updateConfig { config in

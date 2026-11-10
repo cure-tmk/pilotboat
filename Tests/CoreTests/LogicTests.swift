@@ -30,22 +30,35 @@ import Testing
         Presets.install(into: &config)
         #expect(config.rules.map(\.id) == [Presets.reviewRequestedId, Presets.reviewReceivedId])
         #expect(config.rules.allSatisfy { !$0.enabled && $0.executionMode == .auto })
-        #expect(config.rules[0].conditions == [.includeDraft(false)] && config.rules[0].workspacePolicy == .alwaysNew)
+        #expect(config.rules[0].conditions == [.includeDraft(false)] && config.rules[0].workspacePolicy == .reusePrevious)
         #expect(config.rules[1].conditions.isEmpty && config.rules[1].workspacePolicy == .reuseOrCreate)
         #expect(config.promptTemplates.allSatisfy { !PromptRenderer.usesUntrustedVariables($0.body) })
-        #expect(config.presetState[Presets.reviewRequestedId] == PresetState(version: 1))
+        #expect(config.presetState[Presets.reviewRequestedId] == PresetState(version: 2))
     }
 
     @Test func upgradeRewritesOnlyUntouchedPresets() {
         var config = Config()
         Presets.install(into: &config)
         config.promptTemplates[1].body += " Edited."
-        let bodies = Presets.bodies.mapValues { $0.merging([2: "v2"]) { a, _ in a } }
-        Presets.upgrade(&config, bodies: bodies, to: 2)
-        #expect(config.promptTemplates[0].body == "v2")
-        #expect(config.presetState[Presets.reviewRequestedId] == PresetState(version: 2))
+        let bodies = Presets.bodies.mapValues { $0.merging([3: "v3"]) { a, _ in a } }
+        Presets.upgrade(&config, bodies: bodies, to: 3)
+        #expect(config.promptTemplates[0].body == "v3")
+        #expect(config.presetState[Presets.reviewRequestedId] == PresetState(version: 3))
         #expect(config.promptTemplates[1].body.hasSuffix("Edited."))
-        #expect(config.presetState[Presets.reviewReceivedId] == PresetState(editedByUser: true, version: 1))
+        #expect(config.presetState[Presets.reviewReceivedId] == PresetState(editedByUser: true, version: 2))
+    }
+
+    @Test func upgradeFromVersionOneSkipsUnchangedBodies() {
+        var config = Config()
+        Presets.install(into: &config)
+        for id in [Presets.reviewRequestedId, Presets.reviewReceivedId] {
+            config.presetState[id] = PresetState(version: 1)
+            config.promptTemplates[config.promptTemplates.firstIndex { $0.id == id }!].body = Presets.bodies[id]![1]! + " Edited."
+        }
+        Presets.upgrade(&config)
+        #expect(config.presetState[Presets.reviewRequestedId] == PresetState(editedByUser: true, version: 1))
+        #expect(config.presetState[Presets.reviewReceivedId] == PresetState(version: 2))
+        #expect(Presets.outdatedEditedPresets(in: config) == [Presets.reviewRequestedId])
     }
 }
 

@@ -1,5 +1,6 @@
 import Core
 import Foundation
+import os
 import ProcessKit
 
 public struct OrcaSettings: Codable, Hashable, Sendable {
@@ -81,6 +82,7 @@ public struct OrcaRetryableError: RetryableLaunchError, LocalizedError, Equatabl
 public struct OrcaLauncher: Launcher {
     public static let typeID = "orca"
     public let capabilities: LauncherCapabilities = [.reuseWorkspace, .sendToSession]
+    private static let logger = Logger(subsystem: "io.github.cure-tmk.pilotboat", category: "orca")
 
     let runner: any CommandRunner
     let settingsOverride: OrcaSettings?
@@ -105,6 +107,7 @@ public struct OrcaLauncher: Launcher {
         switch request.workspacePolicy {
         case .alwaysNew: return try await alwaysNew(pr, s, repoId, request.prompt, retry)
         case .reuseOrCreate: return try await reuseOrCreate(pr, s, repoId, request, retry)
+        case .reusePrevious: return try await reusePrevious(pr, s, repoId, request, retry)
         }
     }
 
@@ -122,15 +125,7 @@ public struct OrcaLauncher: Launcher {
         let branch = "refs/heads/\(pr.headRef)"
         if let wt = try await worktrees(s).first(where: { $0.repoId == repoId && $0.wt.branch == branch })?.wt {
             if wt.isMain { throw OrcaLauncherError.headCheckedOutInMainWorktree(pr.headRef) }
-            // A replayed --retry-launch must not be turned into a send: the lost launch may have started the agent.
-            if retry?.kind != "launch", let handle = try await runningAgent(s, wt.id, preferred: request.previousTerminalHandle) {
-                let send = try await orca(s, ["terminal", "send", "--terminal", handle, "--text", request.prompt, "--enter", "--wait-submit", "10"] + (retry?.kind == "request" ? ["--retry-request", retry!.id] : []))["send"]
-                let stages = send?["prompt"]?["stages"]?.array?.compactMap(\.string) ?? []
-                guard send?["accepted"]?.bool == true, stages.contains("input_accepted") else { throw OrcaLauncherError.sendNotAccepted }
-                return LaunchResult(workspaceRef: wt.id, terminalHandle: handle, reusedWorkspace: true, sentToExistingSession: true,
-                                    retryToken: send?["prompt"]?["requestId"]?.string.map { "request:\($0)" })
-            }
-            return LaunchResult(workspaceRef: wt.id, terminalHandle: try await agentLaunch(s, wt.id, request.prompt, retry), reusedWorkspace: true)
+            return try await continueIn(wt.id, s, request, retry)
         }
 
         let path = try await repoPath(s, repoId)
@@ -151,6 +146,29 @@ public struct OrcaLauncher: Launcher {
             }
         }
         return LaunchResult(workspaceRef: wt.id, terminalHandle: try await agentLaunch(s, wt.id, request.prompt, retry))
+    }
+
+    private func reusePrevious(_ pr: PullRequestRef, _ s: OrcaSettings, _ repoId: String, _ request: LaunchRequest, _ retry: Retry?) async throws -> LaunchResult {
+        if let ref = request.previousWorkspaceRef,
+           let wt = try await worktrees(s).first(where: { $0.repoId == repoId && $0.wt.id == ref })?.wt, !wt.isMain {
+            try await git(["-C", wt.path, "fetch", "origin", pr.headRef])
+            let merge = try await runner.run(Command("git", ["-C", wt.path, "merge", "--ff-only", pr.headSHA]))
+            if merge.succeeded { return try await continueIn(wt.id, s, request, retry) }
+            Self.logger.notice("Fast-forward of \(wt.path, privacy: .public) to \(pr.headSHA, privacy: .public) failed, starting in a new worktree: \(merge.errorTail, privacy: .public)")
+        }
+        return try await alwaysNew(pr, s, repoId, request.prompt, retry)
+    }
+
+    private func continueIn(_ worktreeId: String, _ s: OrcaSettings, _ request: LaunchRequest, _ retry: Retry?) async throws -> LaunchResult {
+        // A replayed --retry-launch must not be turned into a send: the lost launch may have started the agent.
+        if retry?.kind != "launch", let handle = try await runningAgent(s, worktreeId, preferred: request.previousTerminalHandle) {
+            let send = try await orca(s, ["terminal", "send", "--terminal", handle, "--text", request.prompt, "--enter", "--wait-submit", "10"] + (retry?.kind == "request" ? ["--retry-request", retry!.id] : []))["send"]
+            let stages = send?["prompt"]?["stages"]?.array?.compactMap(\.string) ?? []
+            guard send?["accepted"]?.bool == true, stages.contains("input_accepted") else { throw OrcaLauncherError.sendNotAccepted }
+            return LaunchResult(workspaceRef: worktreeId, terminalHandle: handle, reusedWorkspace: true, sentToExistingSession: true,
+                                retryToken: send?["prompt"]?["requestId"]?.string.map { "request:\($0)" })
+        }
+        return LaunchResult(workspaceRef: worktreeId, terminalHandle: try await agentLaunch(s, worktreeId, request.prompt, retry), reusedWorkspace: true)
     }
 
     private func agentLaunch(_ s: OrcaSettings, _ worktreeId: String, _ prompt: String, _ retry: Retry?) async throws -> String {
@@ -250,15 +268,26 @@ public struct OrcaLauncher: Launcher {
         let prompt = request.prompt.count > 200 ? String(request.prompt.prefix(200)) + "…" : request.prompt
         let agent = ["--agent", s.agent, "--surface", "terminal", "--prompt", prompt] + s.modelArgs
         let o = s.executable
+        let send = [o, "terminal", "send", "--terminal", "<handle>", "--text", prompt, "--enter", "--wait-submit", "10", "--json"]
+        let fresh = [["git", "-C", "<repo path>", "fetch", "origin", pr.headRef],
+                     [o, "worktree", "create", "--repo", repo, "--name", "pr-\(pr.number)-review", "--base-branch", pr.headSHA, "--pr", "\(pr.number)", "--no-parent"] + agent + ["--setup", s.setupForReview, "--json"]]
         let lines: [[String]]
         switch request.workspacePolicy {
         case .alwaysNew:
-            lines = [["git", "-C", "<repo path>", "fetch", "origin", pr.headRef],
-                     [o, "worktree", "create", "--repo", repo, "--name", "pr-\(pr.number)-review", "--base-branch", pr.headSHA, "--pr", "\(pr.number)", "--no-parent"] + agent + ["--setup", s.setupForReview, "--json"]]
+            lines = fresh
+        case .reusePrevious:
+            let previous = request.previousWorkspaceRef ?? "<none>"
+            lines = [[o, "worktree", "list", "--json"],
+                     ["# if the previous worktree \(previous) still exists:"],
+                     ["git", "-C", "<worktree path>", "fetch", "origin", pr.headRef],
+                     ["git", "-C", "<worktree path>", "merge", "--ff-only", pr.headSHA],
+                     ["#   then, if an agent is running:"], send,
+                     ["#   else:"], [o, "agent", "launch", "--worktree", "id:\(previous)"] + agent + ["--json"],
+                     ["# otherwise, or when the fast-forward fails:"]] + fresh
         case .reuseOrCreate:
             lines = [[o, "worktree", "list", "--json"],
                      ["# if refs/heads/\(pr.headRef) exists and an agent is running:"],
-                     [o, "terminal", "send", "--terminal", "<handle>", "--text", prompt, "--enter", "--wait-submit", "10", "--json"],
+                     send,
                      ["# otherwise, creating the worktree first when missing:"],
                      ["git", "-C", "<repo path>", "fetch", "origin", pr.headRef],
                      [o, "worktree", "create", "--repo", repo, "--name", "pr-\(pr.number)", "--branch", pr.headRef, "--base-branch", "origin/\(pr.headRef)", "--pr", "\(pr.number)", "--no-parent", "--setup", s.setupForOwnPR, "--json"],

@@ -200,6 +200,7 @@
 "Resolved PATH" = "解決済みの PATH";
 "Result" = "結果";
 "Retry" = "再試行";
+"Reuse this pull request's review worktree" = "この PR のレビュー用ワークツリーを再利用";
 "Reuses the worktree and running agent for the PR's branch when there is one" = "PR のブランチに既存のワークツリーや実行中のエージェントがあれば、それを再利用します";
 "Reuses worktrees" = "ワークツリーを再利用";
 "Reveal" = "表示";
@@ -283,6 +284,7 @@
 "Unsupported trigger" = "未対応のトリガー";
 "Unsupported trigger (%@)" = "未対応のトリガー（%@）";
 "Until tomorrow" = "明日まで";
+"Updates the worktree from the first review to the new head and continues the same agent session" = "最初のレビューで作ったワークツリーを新しい head に更新し、同じエージェントセッションを続けます";
 "Use Orca" = "Orca を使う";
 "Use a script" = "スクリプトを使う";
 "Use gh CLI" = "gh CLI を使う";

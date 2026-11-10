@@ -200,6 +200,7 @@
 "Resolved PATH" = "Resolved PATH";
 "Result" = "Result";
 "Retry" = "Retry";
+"Reuse this pull request's review worktree" = "Reuse this pull request's review worktree";
 "Reuses the worktree and running agent for the PR's branch when there is one" = "Reuses the worktree and running agent for the PR's branch when there is one";
 "Reuses worktrees" = "Reuses worktrees";
 "Reveal" = "Reveal";
@@ -283,6 +284,7 @@
 "Unsupported trigger" = "Unsupported trigger";
 "Unsupported trigger (%@)" = "Unsupported trigger (%@)";
 "Until tomorrow" = "Until tomorrow";
+"Updates the worktree from the first review to the new head and continues the same agent session" = "Updates the worktree from the first review to the new head and continues the same agent session";
 "Use Orca" = "Use Orca";
 "Use a script" = "Use a script";
 "Use gh CLI" = "Use gh CLI";

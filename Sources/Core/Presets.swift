@@ -3,7 +3,7 @@ import Foundation
 public enum Presets {
     public static let reviewRequestedId = "preset.review-requested"
     public static let reviewReceivedId = "preset.review-received"
-    public static let currentVersion = 1
+    public static let currentVersion = 2
 
     /// Shipped template bodies by version, used to tell untouched presets from edited ones.
     static let bodies: [String: [Int: String]] = [
@@ -11,20 +11,27 @@ public enum Presets {
             Review the pull request {{pr.url}}.
             Use the gh CLI to read the description, the diff, and existing review comments.
             Do not post comments, approve, or push anything. Summarize your findings for me, ordered by severity.
+            """, 2: """
+            Review the pull request {{pr.url}}.
+            Use the gh CLI to read the description, the diff, and existing review comments.
+            Do not post comments, approve, or push anything. Summarize your findings for me, ordered by severity.
+            If you have already reviewed this pull request in this session, focus on what changed since your last review.
             """],
-        reviewReceivedId: [1: """
-            New reviews were submitted on my pull request {{pr.url}}.
-            Use the gh CLI to read the unresolved review threads, decide how to address each one, and propose changes.
-            Ask me before committing, pushing, or replying to any review comment.
-            """],
+        reviewReceivedId: [1: reviewReceivedV1, 2: reviewReceivedV1],
     ]
+
+    private static let reviewReceivedV1 = """
+        New reviews were submitted on my pull request {{pr.url}}.
+        Use the gh CLI to read the unresolved review threads, decide how to address each one, and propose changes.
+        Ask me before committing, pushing, or replying to any review comment.
+        """
 
     public static func install(into config: inout Config, launcherId: LauncherID = "orca") {
         let presets: [(PromptTemplate, Rule)] = [
             (PromptTemplate(id: reviewRequestedId, name: "Review requested", body: bodies[reviewRequestedId]![currentVersion]!),
              Rule(id: reviewRequestedId, name: "Review requested", priority: 0, eventKind: .reviewRequested,
                   conditions: [.includeDraft(false)], settleSeconds: 0, launcherId: launcherId,
-                  workspacePolicy: .alwaysNew, promptTemplateId: reviewRequestedId)),
+                  workspacePolicy: .reusePrevious, promptTemplateId: reviewRequestedId)),
             (PromptTemplate(id: reviewReceivedId, name: "Review received", body: bodies[reviewReceivedId]![currentVersion]!),
              Rule(id: reviewReceivedId, name: "Review received", priority: 0, eventKind: .reviewSubmitted,
                   conditions: [], settleSeconds: 120, launcherId: launcherId,
@@ -47,7 +54,9 @@ public enum Presets {
         for (id, versions) in bodies {
             guard var state = config.presetState[id], state.version < currentVersion,
                   let index = config.promptTemplates.firstIndex(where: { $0.id == id }) else { continue }
-            if state.editedByUser || config.promptTemplates[index].body != versions[state.version] {
+            if versions[state.version] == versions[currentVersion] {
+                state.version = currentVersion
+            } else if state.editedByUser || config.promptTemplates[index].body != versions[state.version] {
                 state.editedByUser = true
             } else {
                 config.promptTemplates[index].body = versions[currentVersion]!

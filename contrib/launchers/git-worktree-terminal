@@ -28,8 +28,19 @@ launch)
   mkdir -p "$base"
   base=$(cd "$base" && pwd -P)
   reused=false
+  dir=
 
-  if [[ "$policy" == reuseOrCreate ]]; then
+  if [[ "$policy" == reusePrevious ]]; then
+    prev=$(jq -r '.previousWorkspaceRef // empty' <<<"$req")
+    if [[ -n "$prev" && -d "$prev" ]] && git -C "$prev" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+      && git -C "$prev" fetch origin "$head_ref" >&2 && git -C "$prev" merge --ff-only "$head_sha" >&2; then
+      dir=$(cd "$prev" && pwd -P); reused=true
+    fi
+  fi
+
+  if [[ -n "$dir" ]]; then
+    :
+  elif [[ "$policy" == reuseOrCreate ]]; then
     dir="$base/pr-$number"
     found=$(git -C "$local_path" worktree list --porcelain | awk -v b="refs/heads/$head_ref" '/^worktree /{w=substr($0,10)} $1=="branch" && $2==b {print w; exit}')
     if [[ -n "$found" ]]; then
@@ -40,6 +51,8 @@ launch)
     fi
   else
     dir="$base/pr-$number-review"
+    n=1
+    while [[ -e "$dir" ]]; do n=$((n + 1)); dir="$base/pr-$number-review-$n"; done
     git -C "$local_path" fetch origin "$head_ref" >&2
     git -C "$local_path" worktree add --detach "$dir" "$head_sha" >&2
   fi

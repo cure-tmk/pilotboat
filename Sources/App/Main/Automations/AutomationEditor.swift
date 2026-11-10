@@ -123,6 +123,9 @@ struct AutomationEditor: View {
         Picker(selection: $draft.rule.workspacePolicy) {
             Captioned("Start an agent in a new worktree", caption: "Creates a fresh worktree for every run")
                 .tag(WorkspacePolicy.alwaysNew)
+            Captioned("Reuse this pull request's review worktree",
+                      caption: "Updates the worktree from the first review to the new head and continues the same agent session")
+                .tag(WorkspacePolicy.reusePrevious)
             Captioned("Continue in the pull request's worktree",
                       caption: "Reuses the worktree and running agent for the PR's branch when there is one")
                 .tag(WorkspacePolicy.reuseOrCreate)
@@ -137,7 +140,7 @@ struct AutomationEditor: View {
         } else {
             Text("No agent launcher is set up", bundle: .resources).font(.caption).foregroundStyle(.red)
         }
-        if rule.workspacePolicy == .reuseOrCreate, !canReuseWorktrees {
+        if rule.workspacePolicy != .alwaysNew, !canReuseWorktrees {
             warning(Text("This launcher cannot reuse worktrees, so every run starts in a new one", bundle: .resources))
         }
     }

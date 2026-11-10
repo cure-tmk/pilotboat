@@ -14,10 +14,16 @@ Pilotboat's `script` launcher runs any executable that implements four subcomman
 - `launch` has a 120 s timeout. The request contains `launcherSettings` (including `localPath`, if set) and `repository.launcherBinding`.
 - `subject` is `{"type": "pullRequest", "pullRequest": {...}}`; dates are ISO 8601.
 - `retryToken` is set when retrying a failed run; a `LaunchResult` may return `retryToken` to have it stored on the run.
+- `workspacePolicy` is one of:
+  - `alwaysNew`: start in a fresh workspace for every run.
+  - `reuseOrCreate`: use the workspace that has the pull request's head branch checked out, creating it if missing.
+  - `reusePrevious`: reuse `previousWorkspaceRef` (the workspace of the most recent run for the same pull request) after updating it to `headSHA`; when it is missing or cannot be updated, behave like `alwaysNew`.
+- `previousWorkspaceRef` and `previousTerminalHandle` come from the most recent run for the same pull request that returned a workspace, or are absent.
+- Launchers that report `"reuseWorkspace": false` always receive `alwaysNew`.
 
 ## git-worktree-terminal
 
-Creates a `git worktree` at `<localPath>/../<repo>-worktrees/pr-<n>[-review]` and starts `claude` with the prompt in a new Terminal.app window. Requires `git`, `jq` and `claude`. Set `PILOTBOAT_DRY_RUN=1` to skip opening Terminal.
+Creates a `git worktree` at `<localPath>/../<repo>-worktrees/pr-<n>` (`reuseOrCreate`) or `pr-<n>-review[-<k>]` (`alwaysNew`) and starts `claude` with the prompt in a new Terminal.app window. For `reusePrevious` it fetches the head branch into `previousWorkspaceRef` and fast-forwards it to `headSHA` (`git merge --ff-only`); if that fails it creates a new review worktree instead. Requires `git`, `jq` and `claude`. Set `PILOTBOAT_DRY_RUN=1` to skip opening Terminal.
 
 Register it in the launcher settings:
 

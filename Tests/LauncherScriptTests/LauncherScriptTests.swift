@@ -204,6 +204,19 @@ func makeRequest(exe: String, localPath: String? = nil, policy: WorkspacePolicy 
         #expect(real(created.workspaceRef) == real(d.appendingPathComponent("myrepo-worktrees/pr-7").path) && !created.reusedWorkspace)
         let reused = try await l.launch(makeRequest(exe: exe, localPath: repo, policy: .reuseOrCreate, headRef: "feature"))
         #expect(real(reused.workspaceRef) == real(created.workspaceRef) && reused.reusedWorkspace)
+
+        _ = try sh(["git", "checkout", "-q", "feature"], cwd: origin)
+        _ = try sh(["git", "commit", "-q", "--allow-empty", "-m", "feat 2"], cwd: origin)
+        let sha2 = try sh(["git", "rev-parse", "HEAD"], cwd: origin)
+        var again = makeRequest(exe: exe, localPath: repo, policy: .reusePrevious, headSHA: sha2)
+        again.previousWorkspaceRef = new.workspaceRef
+        let continued = try await l.launch(again)
+        #expect(real(continued.workspaceRef) == real(new.workspaceRef) && continued.reusedWorkspace)
+        #expect(try sh(["git", "rev-parse", "HEAD"], cwd: continued.workspaceRef) == sha2)
+
+        again.previousWorkspaceRef = d.appendingPathComponent("gone").path
+        let fresh = try await l.launch(again)
+        #expect(real(fresh.workspaceRef) == real(d.appendingPathComponent("myrepo-worktrees/pr-7-review-2").path) && !fresh.reusedWorkspace)
     }
 }
 

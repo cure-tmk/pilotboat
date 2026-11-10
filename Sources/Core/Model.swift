@@ -156,6 +156,7 @@ public enum RepoScope: Codable, Hashable, Sendable {
 public enum WorkspacePolicy: String, Codable, Sendable {
     case alwaysNew
     case reuseOrCreate
+    case reusePrevious
 }
 
 public enum ActorKind: String, Codable, Sendable {

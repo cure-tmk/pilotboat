@@ -470,7 +470,7 @@ import Testing
     }
 
     @Test func reuseFallsBackToAlwaysNewAndPassesPreviousWorkspace() async throws {
-        let h = try Harness(launcher: FakeLauncher(capabilities: []))
+        let h = try Harness(launcher: FakeLauncher(capabilities: [])) { $0.rules[0].workspacePolicy = .reusePrevious }
         await h.tick()
         let pr = makePR()
         h.clock.advance(10)
