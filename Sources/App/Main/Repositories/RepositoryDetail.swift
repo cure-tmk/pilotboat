@@ -95,7 +95,7 @@ private struct OrcaBindingRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Picker(showId ? String(localized: "Orca repository (\(launcher.id))", bundle: .resources) : String(localized: "Orca repository", bundle: .resources),
-                   selection: Binding(get: { bound }, set: set)) {
+                   selection: Binding(get: { bound }, set: { set($0) })) {
                 Text("Not linked", bundle: .resources).tag(String?.none)
                 ForEach(repos, id: \.id) { Text($0.displayName).tag(Optional($0.id)) }
                 if let bound, !repos.contains(where: { $0.id == bound }) { Text(bound).tag(Optional(bound)) }
