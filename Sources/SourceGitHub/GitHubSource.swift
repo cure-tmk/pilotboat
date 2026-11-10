@@ -200,9 +200,9 @@ private struct Author: Decodable {
     enum CodingKeys: String, CodingKey { case typename = "__typename", login, slug }
 }
 
-private struct PRNode: Decodable {
+private struct PRNode: Decodable, Sendable {
     struct Repo: Decodable { let nameWithOwner: String }
-    struct Nodes<T: Decodable>: Decodable { let nodes: [T] }
+    struct Nodes<T: Decodable & Sendable>: Decodable, Sendable { let nodes: [T] }
     struct Label: Decodable { let name: String }
     struct TimelineItem: Decodable { let createdAt: Date?; let requestedReviewer: Author? }
     struct Review: Decodable { let databaseId: Int?; let state: String; let submittedAt: Date?; let author: Author? }
