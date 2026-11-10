@@ -9,7 +9,7 @@ Status: pre-alpha. Builds and runs locally; not yet signed, notarized, or distri
 - **Source** polls GitHub (GraphQL, read-only) for review requests addressed to you and reviews submitted on your PRs.
 - **Rules** map an event kind, a repository scope, and conditions to a **Prompt Template** and a **Launcher**.
 - **Launchers** create the worktree and start the agent: the built-in Orca launcher drives the `orca` CLI; the Script launcher runs any executable that implements a small JSON contract (see `contrib/launchers/`).
-- Every run is recorded; by default each run waits for your approval in a notification before anything is launched.
+- Every run is recorded. Each automation chooses whether a run waits for your approval in a notification or starts automatically.
 
 Pilotboat never writes to GitHub. Posting comments or pushing is the agent's job.
 

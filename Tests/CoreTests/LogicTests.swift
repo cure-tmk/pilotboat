@@ -29,9 +29,9 @@ import Testing
         Presets.install(into: &config)
         Presets.install(into: &config)
         #expect(config.rules.map(\.id) == [Presets.reviewRequestedId, Presets.reviewReceivedId])
-        #expect(config.rules.allSatisfy { !$0.enabled && $0.executionMode == .confirm })
+        #expect(config.rules.allSatisfy { !$0.enabled && $0.executionMode == .auto })
         #expect(config.rules[0].conditions == [.includeDraft(false)] && config.rules[0].workspacePolicy == .alwaysNew)
-        #expect(config.rules[1].conditions == [.actorKind(.human)] && config.rules[1].workspacePolicy == .reuseOrCreate)
+        #expect(config.rules[1].conditions.isEmpty && config.rules[1].workspacePolicy == .reuseOrCreate)
         #expect(config.promptTemplates.allSatisfy { !PromptRenderer.usesUntrustedVariables($0.body) })
         #expect(config.presetState[Presets.reviewRequestedId] == PresetState(version: 1))
     }

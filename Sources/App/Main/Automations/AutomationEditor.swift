@@ -206,7 +206,7 @@ struct AutomationEditor: View {
         Picker(selection: Binding(get: { rule.executionMode }, set: { mode in
             if mode == .auto { confirmsAutomatic = true } else { draft.rule.executionMode = mode }
         })) {
-            Text("Ask me first (recommended)", bundle: .resources).tag(ExecutionMode.confirm)
+            Text("Ask me first", bundle: .resources).tag(ExecutionMode.confirm)
             Text("Run automatically", bundle: .resources).tag(ExecutionMode.auto)
         } label: { Text("Before starting", bundle: .resources) }
         .pickerStyle(.radioGroup)

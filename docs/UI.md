@@ -9,7 +9,7 @@ This document is the contract for the app layer (`Sources/App`). The engine, sto
 3. **User vocabulary, not engine vocabulary.** No "rule", "priority", "settle", "workspace policy", "baseline", "dedupe". Engine terms stay in code.
 4. **Progressive disclosure.** Defaults work. Filters, timing and advanced options are collapsed and labelled in plain words.
 5. **Status is visible, actions are near it.** Every list row shows state with an icon + color; the action for that state (Run / Skip / Retry / Open) sits on the row.
-6. **Safe by default.** Anything that launches an agent or changes GitHub-facing behavior says so and asks.
+6. **Explicit about autonomy.** Automations run without asking by default; switching modes states what that means, and every run, approval and failure stays visible.
 7. **Native macOS.** System controls, `Form` with grouped style, sidebar navigation, SF Symbols, semantic colors, `ContentUnavailableView` for empty states, standard window sizes. No custom chrome.
 
 ## Vocabulary
@@ -107,7 +107,7 @@ Editor (right): a `Form` with grouped style, sections in reading order:
 1. **Name** — text field; **Enabled** toggle (trailing).
 2. **When** — Trigger picker (two choices, with one-line descriptions). **Repositories**: segmented "All monitored" / "Only…" and, when Only, a chip list of chosen repositories with a `+` menu listing monitored repositories. **Filters** (disclosure, collapsed when all default): Reviewer: Anyone / People only / Bots only; "Include draft pull requests" toggle; "Only with labels" and "Not with labels" token fields.
 3. **Then** — **Action**: picker "Start an agent in a new worktree" / "Continue in the pull request's worktree" with a caption explaining each (the second: "Reuses the worktree and running agent for the PR's branch when there is one"). Launcher picker only when more than one launcher is configured (else a caption "Using Orca"); inline warning when the chosen launcher can't reuse worktrees. **Instructions**: `TextEditor` (monospaced, 6–12 lines, grows), toolbar under it: "Insert ▾" menu of variables grouped (Pull request / Repository / Review, with the review group disabled for the review-requested trigger), and a yellow inline note when `{{pr.title}}` is used ("The title is written by the PR author and can contain instructions for the agent"). Validation errors inline under the editor (unsupported variables for this trigger). If this instruction text is shared by other automations, a caption "Also used by N other automations — edits apply to all" with a "Make a copy" button.
-4. **Before starting** — radio: "Ask me first (recommended)" / "Run automatically". Choosing automatic shows a confirmation sheet with the safety text and a "Run automatically" destructive-styled confirm.
+4. **Before starting** — radio: "Ask me first" / "Run automatically" (default). Switching to automatic shows a confirmation sheet with the safety text and a "Run automatically" destructive-styled confirm.
 5. **Timing** (disclosure, collapsed) — "Wait for more reviews" stepper in minutes (0–10) with caption "Reviews that arrive within this window are handled together" (hidden for the review-requested trigger).
 6. Footer bar: [Test with a pull request…] left; [Revert] [Save] right; Save disabled until dirty and valid. Unsaved changes prompt when switching selection.
 

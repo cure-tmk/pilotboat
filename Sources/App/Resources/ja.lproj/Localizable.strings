@@ -37,7 +37,7 @@
 "An automation starts an agent when something happens on one of your pull requests" = "オートメーションは、あなたの PR で何かが起きたときにエージェントを起動します";
 "Anyone" = "全員";
 "Ask first" = "確認する";
-"Ask me first (recommended)" = "毎回確認する（推奨）";
+"Ask me first" = "毎回確認する";
 "Automations" = "オートメーション";
 "Automations and instructions that already exist here can be overwritten, or both versions can be kept" = "すでにあるオートメーションと指示は、上書きするか、両方を残すかを選べます";
 "Automations here" = "このリポジトリのオートメーション";
@@ -185,7 +185,7 @@
 "People only" = "人のみ";
 "Personal access token" = "パーソナルアクセストークン";
 "Pilotboat" = "Pilotboat";
-"Pilotboat watches GitHub for review requests and reviews on your pull requests, and starts an agent for each one. It only reads from GitHub, and it asks before starting anything." = "Pilotboat は GitHub を監視し、レビュー依頼とあなたの PR へのレビューごとにエージェントを起動します。GitHub からは読み取るだけで、起動前には必ず確認します";
+"Pilotboat watches GitHub for review requests and reviews on your pull requests, and starts an agent for each one. It only reads from GitHub. Each automation can ask you first or run automatically." = "Pilotboat は GitHub を監視し、レビュー依頼とあなたの PR へのレビューごとにエージェントを起動します。GitHub からは読み取るだけで、確認してから起動するか自動で起動するかはオートメーションごとに選べます";
 "Preview" = "プレビュー";
 "Prompt template not found: %@" = "指示のテンプレートが見つかりません：%@";
 "Pull request" = "PR";

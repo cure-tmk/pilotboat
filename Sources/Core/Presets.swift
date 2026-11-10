@@ -27,7 +27,7 @@ public enum Presets {
                   workspacePolicy: .alwaysNew, promptTemplateId: reviewRequestedId)),
             (PromptTemplate(id: reviewReceivedId, name: "Review received", body: bodies[reviewReceivedId]![currentVersion]!),
              Rule(id: reviewReceivedId, name: "Review received", priority: 0, eventKind: .reviewSubmitted,
-                  conditions: [.actorKind(.human)], settleSeconds: 120, launcherId: launcherId,
+                  conditions: [], settleSeconds: 120, launcherId: launcherId,
                   workspacePolicy: .reuseOrCreate, promptTemplateId: reviewReceivedId)),
         ]
         for (template, rule) in presets {

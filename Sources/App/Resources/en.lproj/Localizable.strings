@@ -37,7 +37,7 @@
 "An automation starts an agent when something happens on one of your pull requests" = "An automation starts an agent when something happens on one of your pull requests";
 "Anyone" = "Anyone";
 "Ask first" = "Ask first";
-"Ask me first (recommended)" = "Ask me first (recommended)";
+"Ask me first" = "Ask me first";
 "Automations" = "Automations";
 "Automations and instructions that already exist here can be overwritten, or both versions can be kept" = "Automations and instructions that already exist here can be overwritten, or both versions can be kept";
 "Automations here" = "Automations here";
@@ -185,7 +185,7 @@
 "People only" = "People only";
 "Personal access token" = "Personal access token";
 "Pilotboat" = "Pilotboat";
-"Pilotboat watches GitHub for review requests and reviews on your pull requests, and starts an agent for each one. It only reads from GitHub, and it asks before starting anything." = "Pilotboat watches GitHub for review requests and reviews on your pull requests, and starts an agent for each one. It only reads from GitHub, and it asks before starting anything.";
+"Pilotboat watches GitHub for review requests and reviews on your pull requests, and starts an agent for each one. It only reads from GitHub. Each automation can ask you first or run automatically." = "Pilotboat watches GitHub for review requests and reviews on your pull requests, and starts an agent for each one. It only reads from GitHub. Each automation can ask you first or run automatically.";
 "Preview" = "Preview";
 "Prompt template not found: %@" = "Prompt template not found: %@";
 "Pull request" = "Pull request";

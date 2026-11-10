@@ -210,7 +210,7 @@ public struct Rule: Codable, Hashable, Identifiable, Sendable {
     public var promptTemplateId: String
     public var executionMode: ExecutionMode
 
-    public init(id: String = UUID().uuidString, name: String, enabled: Bool = false, priority: Int, eventKind: EventKind, repoScope: RepoScope = .all, conditions: [Condition] = [], settleSeconds: Int, launcherId: LauncherID, workspacePolicy: WorkspacePolicy, promptTemplateId: String, executionMode: ExecutionMode = .confirm) {
+    public init(id: String = UUID().uuidString, name: String, enabled: Bool = false, priority: Int, eventKind: EventKind, repoScope: RepoScope = .all, conditions: [Condition] = [], settleSeconds: Int, launcherId: LauncherID, workspacePolicy: WorkspacePolicy, promptTemplateId: String, executionMode: ExecutionMode = .auto) {
         self.id = id; self.name = name; self.enabled = enabled; self.priority = priority; self.eventKind = eventKind
         self.repoScope = repoScope; self.conditions = conditions; self.settleSeconds = settleSeconds; self.launcherId = launcherId
         self.workspacePolicy = workspacePolicy; self.promptTemplateId = promptTemplateId; self.executionMode = executionMode

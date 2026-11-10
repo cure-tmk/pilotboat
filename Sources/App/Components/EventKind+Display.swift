@@ -30,6 +30,6 @@ extension EventKind {
 
 extension EventKind {
     /// Filters a new automation starts with; the editor keeps Filters collapsed while these are unchanged.
-    var defaultConditions: [Condition] { self == .reviewRequested ? [.includeDraft(false)] : [.actorKind(.human)] }
+    var defaultConditions: [Condition] { self == .reviewRequested ? [.includeDraft(false)] : [] }
     var defaultSettleSeconds: Int { self == .reviewRequested ? 0 : 120 }
 }
