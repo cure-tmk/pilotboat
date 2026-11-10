@@ -184,7 +184,6 @@
 "Paused until %@" = "Paused until %@";
 "People only" = "People only";
 "Personal access token" = "Personal access token";
-"Pilotboat" = "Pilotboat";
 "Pilotboat watches GitHub for review requests and reviews on your pull requests, and starts an agent for each one. It only reads from GitHub. Each automation can ask you first or run automatically." = "Pilotboat watches GitHub for review requests and reviews on your pull requests, and starts an agent for each one. It only reads from GitHub. Each automation can ask you first or run automatically.";
 "Preview" = "Preview";
 "Prompt template not found: %@" = "Prompt template not found: %@";

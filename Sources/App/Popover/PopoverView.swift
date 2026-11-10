@@ -4,7 +4,6 @@ import SwiftUI
 
 struct PopoverView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openSettings) private var openSettings
     @State private var confirmingTurnOn = false
 
     var body: some View {
@@ -96,7 +95,7 @@ struct PopoverView: View {
             Button { model.openMain() } label: { Text("Open Pilotboat", bundle: .resources) }
             Button { Task { await model.triggerTick() } } label: { Text("Check now", bundle: .resources) }
             Spacer()
-            Button { NSApp.activate(); openSettings() } label: { Image(systemName: "gearshape") }
+            Button { model.openSettings() } label: { Image(systemName: "gearshape") }
                 .help(Text("Settings", bundle: .resources))
                 .accessibilityLabel(Text("Settings", bundle: .resources))
             Button { NSApp.terminate(nil) } label: { Image(systemName: "power") }

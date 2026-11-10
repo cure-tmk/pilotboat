@@ -18,22 +18,62 @@ final class AppState {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let state = AppState()
+    private var statusItem: StatusItemController?
+    private var mainWindow: WindowController?
+    private var setupWindow: WindowController?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         Notifier.shared.activate()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let statusItem = StatusItemController(state: state)
+        self.statusItem = statusItem
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["PILOTBOAT_OPEN_POPOVER"] == "1" {
+            Task { try? await Task.sleep(for: .seconds(1)); statusItem.showPopover() }
+        }
+        #endif
         Task {
             do {
                 let model = try await Bootstrap.make()
                 Notifier.shared.model = model
                 state.model = model
+                didBoot(model)
             } catch {
                 state.bootError = AppModel.describe(error)
                 appLogger.error("Startup failed: \(self.state.bootError ?? "", privacy: .public)")
             }
         }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard let model = state.model else { return true }
+        (model.onboardingCompleted ? mainWindow : setupWindow)?.show()
+        return true
+    }
+
+    private func didBoot(_ model: AppModel) {
+        let mainWindow = WindowController.main(model: model)
+        self.mainWindow = mainWindow
+        setupWindow = WindowController.setup(model: model)
+        model.showMain = { mainWindow.show() }
+        model.closePopover = { [weak statusItem] in statusItem?.closePopover() }
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["PILOTBOAT_OPEN_MAIN"] == "1" { mainWindow.show() }
+        #endif
+        guard !model.onboardingCompleted else { return }
+        setupWindow?.show()
+        awaitOnboarding(model)
+    }
+
+    private func awaitOnboarding(_ model: AppModel) {
+        let done = withObservationTracking { model.onboardingCompleted } onChange: { [weak self] in
+            Task { @MainActor in self?.awaitOnboarding(model) }
+        }
+        guard done else { return }
+        setupWindow?.close()
+        model.openMain(section: .activity)
     }
 }
 
@@ -41,47 +81,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct PilotboatApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
+    // The status item, popover and windows are AppKit-managed: MenuBarExtra could leave the item stuck highlighted.
     var body: some Scene {
-        MenuBarExtra {
-            ModelGate(state: delegate.state, showsQuit: true) { PopoverView() }
-        } label: {
-            StatusIcon(state: delegate.state)
-        }
-        .menuBarExtraStyle(.window)
-
-        Window(Text("Pilotboat", bundle: .resources), id: WindowID.main) {
-            ModelGate(state: delegate.state) { MainWindow() }
-        }
-        .defaultSize(width: 980, height: 640)
-        .windowResizability(.contentMinSize)
-
+        // Never inserted: with Settings as the only scene, SwiftUI opens the Settings window at launch.
+        MenuBarExtra(isInserted: .constant(false)) { EmptyView() } label: { EmptyView() }
         Settings {
             ModelGate(state: delegate.state) { SettingsWindow() }
         }
-
-        Window(Text("Welcome", bundle: .resources), id: WindowID.setup) {
-            ModelGate(state: delegate.state) { SetupScene() }
-        }
-        .defaultSize(width: 560, height: 520)
-        .windowResizability(.contentSize)
-
-        #if DEBUG
-        // Opened only with PILOTBOAT_PREVIEW_POPOVER=1: a MenuBarExtra panel cannot be captured as a window.
-        Window(Text(verbatim: "Popover preview"), id: WindowID.popoverPreview) {
-            ModelGate(state: delegate.state) { PopoverView().frame(width: 360) }
-        }
-        .windowResizability(.contentSize)
-        #endif
     }
-}
-
-enum WindowID {
-    static let main = "main"
-    static let setup = "setup"
-    #if DEBUG
-    static let popoverPreview = "popoverPreview"
-    static let previewsPopover = ProcessInfo.processInfo.environment["PILOTBOAT_PREVIEW_POPOVER"] == "1"
-    #endif
 }
 
 struct ModelGate<Content: View>: View {
@@ -102,70 +109,5 @@ struct ModelGate<Content: View>: View {
             }
             .padding(16)
         }
-    }
-}
-
-private struct SetupScene: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        SetupWindow()
-            .frame(width: 560, height: 520)
-            .onChange(of: model.onboardingCompleted) { _, done in if done { dismiss() } }
-    }
-}
-
-struct StatusIcon: View {
-    let state: AppState
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        HStack(spacing: 2) {
-            Image(nsImage: Self.image(symbol: symbol, badge: showsBadge))
-            if let count = state.model?.pendingRuns.count, count > 0 { Text(count, format: .number) }
-        }
-        .task(id: state.model == nil) {
-            guard let model = state.model else { return }
-            model.openWindowAction = openWindow
-            #if DEBUG
-            if WindowID.previewsPopover { openWindow(id: WindowID.popoverPreview) }
-            #endif
-            guard !model.onboardingCompleted else { return }
-            openWindow(id: WindowID.setup)
-            // After opening: activating first leaves the new window inactive, so its default button draws grey.
-            NSApp.activate()
-        }
-    }
-
-    private var symbol: String {
-        guard let model = state.model else { return state.bootError == nil ? "sailboat" : "exclamationmark.triangle.fill" }
-        return model.status.monitoring == .on ? "sailboat.fill" : "sailboat"
-    }
-
-    private var showsBadge: Bool {
-        guard let model = state.model else { return false }
-        return model.status.lastError != nil || !model.pendingRuns.isEmpty
-    }
-
-    // A template image can't carry the red dot, so the badged icon is drawn by hand.
-    private static func image(symbol: String, badge: Bool) -> NSImage {
-        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
-        guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: "Pilotboat")?.withSymbolConfiguration(config) else { return NSImage() }
-        guard badge else {
-            base.isTemplate = true
-            return base
-        }
-        let image = NSImage(size: base.size, flipped: false) { rect in
-            base.draw(in: rect)
-            NSColor.labelColor.set()
-            rect.fill(using: .sourceAtop)
-            let dot = NSRect(x: rect.maxX - 6, y: rect.maxY - 6, width: 6, height: 6)
-            NSColor.systemRed.setFill()
-            NSBezierPath(ovalIn: dot).fill()
-            return true
-        }
-        image.isTemplate = false
-        return image
     }
 }

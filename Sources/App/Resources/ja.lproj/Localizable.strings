@@ -184,7 +184,6 @@
 "Paused until %@" = "%@まで一時停止中";
 "People only" = "人のみ";
 "Personal access token" = "パーソナルアクセストークン";
-"Pilotboat" = "Pilotboat";
 "Pilotboat watches GitHub for review requests and reviews on your pull requests, and starts an agent for each one. It only reads from GitHub. Each automation can ask you first or run automatically." = "Pilotboat は GitHub を監視し、レビュー依頼とあなたの PR へのレビューごとにエージェントを起動します。GitHub からは読み取るだけで、確認してから起動するか自動で起動するかはオートメーションごとに選べます";
 "Preview" = "プレビュー";
 "Prompt template not found: %@" = "指示のテンプレートが見つかりません：%@";

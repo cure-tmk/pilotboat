@@ -38,8 +38,8 @@ final class AppModel {
     private(set) var onboardingCompleted = UserDefaults.standard.bool(forKey: AppModel.onboardingKey)
     var lastErrorMessage: String?
     let router = MainRouter()
-    /// Captured from a scene view; `AppModel` has no SwiftUI environment of its own.
-    @ObservationIgnored var openWindowAction: OpenWindowAction?
+    @ObservationIgnored var showMain: (() -> Void)?
+    @ObservationIgnored var closePopover: (() -> Void)?
 
     init(engine: Engine, scheduler: Scheduler, github: GitHubSource, secretStore: any SecretStore, runner: ProcessRunner,
          orcaLauncher: OrcaLauncher, scriptLauncher: ScriptLauncher, settingsSnapshot: SettingsSnapshot,
@@ -184,7 +184,6 @@ final class AppModel {
             onboardingCompleted = true
         }
         guard onboardingCompleted else { return }
-        openMain(section: .activity)
         await scheduler.start()
         await triggerTick()
     }
@@ -192,9 +191,18 @@ final class AppModel {
     // MARK: Navigation
 
     func openMain(section: MainSection? = nil, runId: UUID? = nil, automationId: String? = nil, repositoryId: UUID? = nil) {
+        closePopover?()
         router.show(section: section, runId: runId, automationId: automationId, repositoryId: repositoryId)
+        showMain?()
+    }
+
+    func openSettings() {
+        closePopover?()
         NSApp.activate()
-        openWindowAction?(id: WindowID.main)
+        // `showSettingsWindow:` sent directly is ignored on recent macOS; the app menu's Settings item still works.
+        guard let menu = NSApp.mainMenu?.items.first?.submenu,
+              let index = menu.items.firstIndex(where: { $0.keyEquivalent == "," && $0.keyEquivalentModifierMask == .command }) else { return }
+        menu.performActionForItem(at: index)
     }
 
     func setLaunchAtLogin(_ on: Bool) async {

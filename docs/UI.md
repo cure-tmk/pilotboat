@@ -47,7 +47,7 @@ Skip reasons in words: you skipped it / no answer in 24 hours / pull request was
 
 ## Surfaces
 
-### 1. Menu bar popover (home) — `MenuBarExtra`, `.window` style, 360 pt wide
+### 1. Menu bar popover (home) — AppKit `NSStatusItem` + transient `NSPopover`, 360 pt wide
 
 ```
 ┌──────────────────────────────────────┐
@@ -72,10 +72,10 @@ Skip reasons in words: you skipped it / no answer in 24 hours / pull request was
 ```
 
 - Turning monitoring on from the popover shows a confirmation sheet with one checkbox: "Also handle review requests that are already waiting" (default off). Explain in one line why.
-- Status icon in the menu bar: `sailboat.fill` on, `sailboat` (outline) off/paused, `sailboat.fill` with a red badge dot when `lastError` or when runs wait for approval (badge count via `MenuBarExtra` label text when > 0).
+- Status icon in the menu bar: `sailboat.fill` on, `sailboat` (outline) off/paused, `sailboat.fill` with a red badge dot when `lastError` or when runs wait for approval (badge count as the status item's title when > 0).
 - The popover never shows engine internals; "Checked" is the last tick time.
 
-### 2. Main window — `Window("Pilotboat", id: "main")`, 980 × 640 default, `NavigationSplitView`
+### 2. Main window — AppKit `NSWindow` hosting `MainWindow`, 980 × 640 default, `NavigationSplitView`
 
 Sidebar (section-less, icon + label):
 
@@ -140,7 +140,7 @@ Single scrollable page of grouped cards; a [Check again] button in the toolbar.
 - **Launchers**: list of launchers with [+ ▾] (Orca / Script); Orca form: agent, model, effort (optional), `orca` path (optional), setup hooks for others' PRs / own PRs (Skip / Inherit / Run with captions), activate window toggle; Script form: executable (file picker), default local path, capabilities read-out, [Test] (runs diagnose). Deleting a launcher used by an automation is blocked with a message naming it.
 - **Data**: Export settings… / Import settings… (policy sheet before import, summary after); the configuration folder path.
 
-### 4. First run — `Window("Welcome", id: "setup")`, 560 × 520, opened automatically until completed
+### 4. First run — AppKit `NSWindow` "Welcome", 560 × 520, opened automatically until completed
 
 Four steps, progress dots, Back/Continue:
 
